@@ -1135,6 +1135,19 @@ void TORTOISE::AlignB0ToReorientation()
             }
         }
 
+        {
+            double mn= std::numeric_limits<float>::max();
+            itk::ImageRegionIteratorWithIndex<ImageType3D> it(target_img,target_img->GetLargestPossibleRegion());
+            for(it.GoToBegin();!it.IsAtEnd();++it)
+            {
+                if(it.Get()<mn)
+                    mn=it.Get();
+            }
+            for(it.GoToBegin();!it.IsAtEnd();++it)
+            {
+                it.Set(it.Get()-mn);
+            }
+        }
 
 
         ImageType3D::Pointer b0_img=nullptr;
@@ -1601,6 +1614,7 @@ void TORTOISE::CheckAndCopyInputData()
             myio->SetFileName(input_name);
             myio->ReadImageInformation();
             bool is3D= (myio->GetNumberOfDimensions()==3);
+            int nvols=1;
             if(is3D)
             {
                 ImageType3D::Pointer fvol= readImageD<ImageType3D>(input_name);
@@ -1667,6 +1681,8 @@ void TORTOISE::CheckAndCopyInputData()
                     outfile.close();
                 }
             }
+            else
+                nvols=myio->GetDimensions(3);
 
             //and finally copy JSON file
             std::string input_basename = input_name.substr(0,input_name.rfind(".nii"));
@@ -1746,6 +1762,12 @@ void TORTOISE::CheckAndCopyInputData()
             if(bmtxt_exists)
             {
                 vnl_matrix<double> Bmatrix= read_bmatrix_file(input_basename+std::string(".bmtxt"));
+                if(Bmatrix.rows()!=nvols)
+                {
+                    std::cout<<"The number of volumes in the bmatrix and NIFTI do not match. Exiting..."<<std::endl;
+                    exit(EXIT_FAILURE);
+                }
+
                 for(int v=0;v< Bmatrix.rows();v++)
                 {
                     auto bmat_vec= Bmatrix.get_row(v);
@@ -2055,6 +2077,7 @@ bool TORTOISE::CheckIfInputsOkay()
     }
 
 
+    std::string up_bmtxt_name, up_bvals_name,up_bvecs_name;
     if(parser->getUpBvalName()==""  && parser->getUpBvecName()=="")
     {
         std::string input_name=parser->getUpInputName();
@@ -2118,7 +2141,7 @@ bool TORTOISE::CheckIfInputsOkay()
             {
                 if(!bvecs_exists || !bvals_exists)
                 {
-                    std::cout<<"Either the .bmtxt file or the .bvecs/.bvals file should be present in the same folder as the up data file and should have the same basename."<<std::endl;
+                    std::cout<<"Either the .bmtxt file or the .bvecs/.bvals file should be present in the same folder as the down data file and should have the same basename."<<std::endl;
                     return 0;
                 }
             }

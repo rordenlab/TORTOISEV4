@@ -90,7 +90,7 @@ float  ComputeUpdateCC(ImageType3D::IndexType index,
 
     double sFF_sMM = sFF * sMM;
 
-    float val=0;
+    float val=-1;
     if(fabs(sFF_sMM) >LIMCC && fabs(sMM) > LIMCC)
     {
         val= -sFM*sFM/ sFF_sMM;
@@ -139,7 +139,7 @@ float ComputeMetric_CC(const ImageType3D::Pointer up_img, const ImageType3D::Poi
     m_MetricImage->SetSpacing(up_img->GetSpacing());
     m_MetricImage->SetOrigin(up_img->GetOrigin());
     m_MetricImage->SetDirection(up_img->GetDirection());
-    m_MetricImage->FillBuffer(0);
+    m_MetricImage->FillBuffer(-1);
                    
     
     #pragma omp parallel for

@@ -1527,7 +1527,7 @@ ComputeMetric_MSJac_kernel( cudaPitchedPtr up_img, cudaPitchedPtr down_img,
                     float K= valf-valm;
 
 
-                    row_metric[i]= K*K;                    
+                    row_metric[i]= K*K;
 
                     updateF[0]= 2*K*gradI2.x*detf ;
                     updateF[1]= 2*K*gradI2.y*detf ;

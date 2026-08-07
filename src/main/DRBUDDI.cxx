@@ -1017,6 +1017,19 @@ void DRBUDDI::Step1_RigidRegistration()
                 it.Set(it.Get()* str_img_orig->GetPixel(ind3)*5 + str_img_orig->GetPixel(ind3) );
             }
         }
+        {
+            double mn= std::numeric_limits<float>::max();
+            itk::ImageRegionIteratorWithIndex<ImageType3D> it(str_img,str_img->GetLargestPossibleRegion());
+            for(it.GoToBegin();!it.IsAtEnd();++it)
+            {
+                if(it.Get()<mn)
+                    mn=it.Get();
+            }
+            for(it.GoToBegin();!it.IsAtEnd();++it)
+            {
+                it.Set(it.Get()-mn);
+            }
+        }
 
         str_img=PreprocessImage(str_img,0,1,0,1);
         initial_corrected_b0=PreprocessImage(initial_corrected_b0,0,1,0,1);

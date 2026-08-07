@@ -53,7 +53,7 @@ float  ComputeUpdateCCJacS(ImageType3D::IndexType index,
 
 
 
-    float val=0;
+    float val=-1;
      //////////////////////////////// at x ////////////////////////////////////
      {
 
@@ -285,7 +285,7 @@ float ComputeMetric_CCJacS(const ImageType3D::Pointer up_img, const ImageType3D:
     m_MetricImage->SetSpacing(up_img->GetSpacing());
     m_MetricImage->SetOrigin(up_img->GetOrigin());
     m_MetricImage->SetDirection(up_img->GetDirection());
-    m_MetricImage->FillBuffer(0);
+    m_MetricImage->FillBuffer(-1);
 
 
 

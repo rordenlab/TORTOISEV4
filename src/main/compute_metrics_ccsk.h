@@ -90,7 +90,7 @@ float  ComputeUpdateCCSK(ImageType3D::IndexType index, ImageType3D::Pointer up_i
 
     double sSS_sKK = sSS * sKK;
 
-    double val=0;
+    double val=-1;
     if(fabs(sSS_sKK) > LIMCCSK && fabs(sKK) > LIMCCSK )
     {
         val= -sKS*sKS/ sSS_sKK;
@@ -156,6 +156,7 @@ float ComputeMetric_CCSK(const ImageType3D::Pointer up_img, const ImageType3D::P
     m_MetricImage->SetSpacing(up_img->GetSpacing());
     m_MetricImage->SetOrigin(up_img->GetOrigin());
     m_MetricImage->SetDirection(up_img->GetDirection());
+    m_MetricImage->FillBuffer(-1);
 
 
     ImageType3D::Pointer KImage= ImageType3D::New();

@@ -425,12 +425,6 @@ RigidTransformType::Pointer RigidRegisterImagesEuler(ImageType3D::Pointer fixed_
     ImageType3D::PointType mid_pt;
     fixed_img->TransformContinuousIndexToPhysicalPoint(mid_ind,mid_pt);
 
-    RigidTransformType::FixedParametersType rot_center;
-    rot_center.set_size(3);
-    rot_center[0]=mid_pt[0];
-    rot_center[1]=mid_pt[1];
-    rot_center[2]=mid_pt[2];
-    initial_transform->SetFixedParameters(rot_center);
 
 
     if(in_trans==nullptr)
@@ -441,7 +435,7 @@ RigidTransformType::Pointer RigidRegisterImagesEuler(ImageType3D::Pointer fixed_
         initializer->SetTransform( initial_transform );
         initializer->SetFixedImage( fixed_img );
         initializer->SetMovingImage( moving_img );
-        //initializer->GeometryOn();
+       // initializer->GeometryOn();
         initializer->MomentsOn();
         initializer->InitializeTransform();
     }
@@ -449,6 +443,13 @@ RigidTransformType::Pointer RigidRegisterImagesEuler(ImageType3D::Pointer fixed_
     {
         initial_transform->SetParameters(in_trans->GetParameters());
     }
+
+    RigidTransformType::FixedParametersType rot_center;
+    rot_center.set_size(3);
+    rot_center[0]=mid_pt[0];
+    rot_center[1]=mid_pt[1];
+    rot_center[2]=mid_pt[2];
+    initial_transform->SetFixedParameters(rot_center);
 
 
     using RigidRegistrationType = itk::ImageRegistrationMethodv4<ImageType3D, ImageType3D, RigidTransformType> ;

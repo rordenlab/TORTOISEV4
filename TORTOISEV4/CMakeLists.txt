@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 PROJECT(TORTOISEV4  )
 
 SET(USEOPENMP 1)
- #  SET(CMAKE_BUILD_TYPE Debug)
- #  SET(ISDEBUG 1)
+#   SET(CMAKE_BUILD_TYPE Debug)
+#   SET(ISDEBUG 1)
 
 if ( NOT DEFINED USECUDA)
     SET(USECUDA  0)
@@ -88,6 +88,8 @@ IF(USECUDA)
     set(CMAKE_CUDA_COMPILER_LIBRARY_ROOT "/usr/local/cuda")
     set(CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES "/usr/local/cuda/targets/x86_64-linux/include/")
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
+    include_directories("/usr/local/cuda/targets/x86_64-linux/include/")
 
     find_package(CUDAToolkit)
 
@@ -568,8 +570,8 @@ set_target_properties(ResampleTensor PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAK
 #target_link_libraries(RigidPhaseScaleRegister ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
 
 
-add_executable(JoanahRegisterAlongAxes  ../src/tools/JoanahUpDownB0Transformations/JoanahRegisterAlongAxes.cxx ../src/main/register_dwi_to_b0.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ${SOURCES})
-target_link_libraries(JoanahRegisterAlongAxes ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
+#add_executable(JoanahRegisterAlongAxes  ../src/tools/JoanahUpDownB0Transformations/JoanahRegisterAlongAxes.cxx ../src/main/register_dwi_to_b0.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ${SOURCES})
+#target_link_libraries(JoanahRegisterAlongAxes ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
 
 
 IF(USE_VTK)
