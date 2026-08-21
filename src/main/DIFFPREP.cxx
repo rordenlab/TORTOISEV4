@@ -19,8 +19,11 @@
 
 
 #include "register_dwi_to_b0.h"
-#ifdef USECUDA
+#ifdef USEGPU
+    #include "../gpu_src/gpu_device.h"
     #include "register_dwi_to_b0_cuda.h"
+#endif
+#ifdef USECUDA
     #include "register_dwi_to_slice_cuda.h"
 #endif
 
@@ -582,27 +585,14 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
     }
 
 
-    #ifdef USECUDA
+    #ifdef USEGPU
         const int GPU_CPU_ratio=15;    //this should be the ratio of how much GPU is faster than a CPU per volume
                                  // Ideally, I should check what GPU it is and automatically decide it, but too much work for this.
         //The volumes in my_threads 1 will be processed by te GPU
         // the others by the CPU
         // so we give a bit more volumes to threads1
-        int NGPUs;
-        cudaGetDeviceCount	(&NGPUs);
-
-        std::vector<int> cuda_device_ids;
-        cudaDeviceProp prop;
-        for(int g=0;g<NGPUs;g++)
-        {
-            cudaGetDeviceProperties( & prop,g );
-            std::string gnm =prop.name;
-            if(gnm.find("Display") == std::string::npos)      //This is to prevent DGX system's display adaptor
-            {
-                cuda_device_ids.push_back(g);
-            }
-        }
-        NGPUs=cuda_device_ids.size();
+        std::vector<int> cuda_device_ids = GPUDeviceIds();
+        int NGPUs = (int)cuda_device_ids.size();
         std::cout<<"NGPUs: " << NGPUs <<std::endl;
 
 
@@ -655,6 +645,39 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
                 n_omp_threads=   Nvols- (GPU_CPU_ratio * NGPUs) + NGPUs;
             }
         }
+#ifdef TORTOISE_DETERMINISTIC_GPU
+        // VALIDATION BUILD ONLY - off unless -DDETERMINISTIC_GPU=1 is configured.
+        //
+        // Send EVERY volume to the GPU path. By default the volumes are split
+        // between the CUDA path and the ITK CPU path for load balancing, and the
+        // ITK path is not reproducible run-to-run: two runs of the same binary on
+        // the same input disagree on ~1900 of 3312 registration parameters, which
+        // propagates to ~35% of final DWI voxels. The GPU path alone IS
+        // reproducible (benchmark/scripts/demo_diffprep_nondeterminism.sh
+        // demonstrates both halves).
+        //
+        // That nondeterminism makes end-to-end comparison of one backend against
+        // another almost meaningless, because the reference does not agree with
+        // itself. With this switch the CUDA run becomes a stable target, so a
+        // WebGPU or Metal backend can be diffed against it and any difference
+        // attributed to the backend rather than to thread scheduling.
+        //
+        // Cost: the CPU volumes are no longer processed in parallel with the GPU
+        // ones, so registration takes roughly GPU_CPU_ratio-fold longer for
+        // datasets big enough to have spilled onto the CPU. Every other stage
+        // (denoising, Gibbs, tensor/MAPMRI fitting) keeps its full CPU
+        // parallelism - which is the advantage over OMP_NUM_THREADS=1, the
+        // no-code-change alternative that single-threads the entire pipeline.
+        //
+        // Arithmetic is untouched: this only changes which implementation each
+        // volume is routed to, not what either computes.
+        for(int v=0; v<Nvols; v++)
+            gpu_ids_per_thread[v]= v % NGPUs;
+        n_omp_threads= NGPUs;
+        (*stream)<<"DETERMINISTIC_GPU: all "<<Nvols<<" volumes routed to the GPU path"
+                 <<" ("<<NGPUs<<" thread(s)); ITK CPU registration disabled."<<std::endl;
+#endif
+
         omp_set_num_threads(n_omp_threads);
 
         my_threads.clear();
@@ -683,7 +706,7 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
 
     (*stream)<<"Done registering vol: "<<std::flush;
 
-#ifdef USECUDA
+#ifdef USEGPU
     #pragma omp parallel for schedule(static,1)
 #else
     #pragma omp parallel for
@@ -717,7 +740,7 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
 
                 OkanQuadraticTransformType::Pointer curr_trans=nullptr;
 
-                #ifdef USECUDA
+                #ifdef USEGPU
                     if(thr>= NGPUs)
                     {
                         curr_trans=  RegisterDWIToB0(target_target, curr_vol, this->PE_string, this->mecc_settings,true,signal_ranges,vol );
@@ -725,7 +748,7 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
                     else
                     {
                     //    TORTOISE::ReserveGPU(gpu_ids_per_thread[vol]);
-                        cudaSetDevice(cuda_device_ids[gpu_ids_per_thread[vol]]);
+                        GPUSetDevice(cuda_device_ids[gpu_ids_per_thread[vol]]);
                         curr_trans=  RegisterDWIToB0_cuda(target_target, curr_vol, this->PE_string, this->mecc_settings,true,signal_ranges);
                    //     TORTOISE::ReleaseGPU(gpu_ids_per_thread[vol]);
                     }
@@ -766,8 +789,8 @@ void DIFFPREP::SynthMotionEddyCorrectAllDWIs(std::vector<ImageType3D::Pointer> t
         } //for vol
     } //for thr
 
-        #ifdef USECUDA
-            cudaSetDevice(0);
+        #ifdef USEGPU
+            GPUSetDevice(0);
         #endif
 
     (*stream)<<std::endl<<std::endl;

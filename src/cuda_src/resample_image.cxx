@@ -2,6 +2,7 @@
 #define _RESAMPLEIMAGE_CXX
 
 #include "resample_image.h"
+#include "gpu_capture.h"
 
 
 
@@ -10,6 +11,9 @@
 
      if(main_field==nullptr)
          return nullptr;
+
+    gpucap::Rec cap("ResampleImage", main_field->components_per_voxel);
+    cap.in("main_field",main_field).geom("virtual_img",virtual_img);
 
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(main_field->components_per_voxel*sizeof(float)*virtual_img->sz.x,virtual_img->sz.y,virtual_img->sz.z);
@@ -37,6 +41,7 @@
     output->spc=virtual_img->spc;
     output->components_per_voxel= main_field->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    cap.out("output",output).save();
     return output;
 
 }

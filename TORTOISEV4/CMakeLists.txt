@@ -12,6 +12,46 @@ endif()
 if ( NOT DEFINED USE_VTK)
     SET(USE_VTK 0)
 endif()
+if ( NOT DEFINED USEWEBGPU)
+    SET(USEWEBGPU 0)
+endif()
+if ( USECUDA AND USEWEBGPU )
+    message(FATAL_ERROR "USECUDA and USEWEBGPU are mutually exclusive; configure one backend per build tree")
+endif()
+
+# Validation-only. Routes every DWI volume through the GPU registration path
+# instead of splitting it with the (non-reproducible) ITK CPU path, making a GPU
+# run deterministic so another backend can be diffed against it meaningfully.
+# Costs registration performance. NOTE it DOES change computed values: its
+# OmpThreadBase.h half fixes ITK's work-unit count, which alters metric values (that
+# is what makes them reproducible). See DIFFPREP.cxx and
+# benchmark/scripts/demo_diffprep_nondeterminism.sh. Never enable for production.
+if ( NOT DEFINED DETERMINISTIC_GPU)
+    SET(DETERMINISTIC_GPU 0)
+endif()
+if ( DETERMINISTIC_GPU )
+    add_definitions(-DTORTOISE_DETERMINISTIC_GPU)
+    message(WARNING "DETERMINISTIC_GPU=1: all volumes routed to the GPU registration path. "
+                    "Reproducible but slower; validation builds only.")
+endif()
+
+# Variant builds MUST NOT collide with the reference binaries. All build trees share
+# one bin/ (CMAKE_RUNTIME_OUTPUT_DIRECTORY below), and until this was added,
+# build_cuda_nofma and build_cuda_det both linked to bin/TORTOISEProcess_cuda -
+# and build_cuda_nofma also relinked bin/gpu_replay, the CUDA self-replay
+# bit-exactness anchor. A single `cmake --build build_cuda_det` would silently
+# replace the CUDA *reference* with a validation build, and every downstream gate
+# would then be measuring the wrong binary while reporting success.
+set(TORTOISE_BIN_SUFFIX "")
+if ( DETERMINISTIC_GPU )
+    set(TORTOISE_BIN_SUFFIX "${TORTOISE_BIN_SUFFIX}_det")
+endif()
+if ( CMAKE_CUDA_FLAGS MATCHES "fmad=false" )
+    set(TORTOISE_BIN_SUFFIX "${TORTOISE_BIN_SUFFIX}_nofma")
+endif()
+if ( NOT TORTOISE_BIN_SUFFIX STREQUAL "" )
+    message(STATUS "Variant build: executables get the suffix '${TORTOISE_BIN_SUFFIX}'")
+endif()
 
 if ( NOT DEFINED QSIPREP)
     SET(QSIPREP 0)
@@ -98,6 +138,7 @@ IF(USECUDA)
     if(CMAKE_CUDA_COMPILER)
       enable_language(CUDA)
       add_definitions(-DUSECUDA)
+      add_definitions(-DUSEGPU)          # see the USEWEBGPU branch for why
       message("CUDA Enabled..")
     else()
       message(STATUS "No CUDA SUPPORT..")
@@ -151,18 +192,166 @@ endif()
 set(SOURCES ../src/main/defines.cxx  ../src/main/TORTOISE_global.cxx ../src/main/antsCommandLineParser.cxx ../src/main/antsCommandLineOption.cxx  ../src/utilities/TORTOISE_Utilities.cxx ../src/utilities/extract_3Dvolume_from_4D.cxx  ../src/utilities/read_3Dvolume_from_4D.cxx ../src/utilities/read_bmatrix_file.cxx ../src/utilities/math_utilities.cxx ../src/external_src/cmpfit-1.3a/mpfit.c)
 include_directories(../src/main)
 
+IF(USEWEBGPU)
+    # Dawn (WebGPU). Built separately by tortoise_libraries/build_dawn.sh, which
+    # pins the revision in dawn.pin. Vulkan backend only - the GL backends are
+    # compiled out so no build-time path to the integrated GPU exists.
+    # DAWN_DIR must be supplied by the builder: -DDAWN_DIR=/path/to/dawn, or the
+    # DAWN_DIR environment variable. There is deliberately no default - a default
+    # pointing at one developer's home directory is not portable and hides the
+    # requirement until the link step.
+    if(NOT DEFINED DAWN_DIR AND DEFINED ENV{DAWN_DIR})
+        set(DAWN_DIR $ENV{DAWN_DIR})
+    endif()
+    if(NOT DEFINED DAWN_DIR)
+        message(FATAL_ERROR
+            "USEWEBGPU=1 requires DAWN_DIR. Pass -DDAWN_DIR=<path to the dawn checkout> "
+            "(the directory containing build/src/dawn/native/libwebgpu_dawn.a), or set "
+            "the DAWN_DIR environment variable. See tortoise_libraries/build_dawn.sh.")
+    endif()
+    set(DAWN_LIB ${DAWN_DIR}/build/src/dawn/native/libwebgpu_dawn.a)
+    if(NOT EXISTS ${DAWN_LIB})
+        message(FATAL_ERROR "Dawn not built: ${DAWN_LIB} missing. Run tortoise_libraries/build_dawn.sh")
+    endif()
+    # USEWEBGPU/USEGPU and the shim include path are applied PER TARGET, not
+    # directory-wide: the ELSE(USECUDA) branch below still defines the plain CPU
+    # targets, and giving those -DUSEGPU would compile GPU code paths into
+    # binaries that link neither the WebGPU sources nor Dawn.
+    # USEGPU is set on the command line rather than via defines.h because several
+    # files use #ifdef USEGPU without including it; an invisible macro would
+    # silently compile the GPU branch out and fall back to CPU.
+    set(WEBGPU_DEFS USEWEBGPU USEGPU)
+    # gpu_src holds one shim per backend interface and must shadow cuda_src, whose
+    # directory is still needed for the backend-neutral sources that live there.
+    set(WEBGPU_INCS ${CMAKE_CURRENT_SOURCE_DIR}/../src/gpu_src
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../src/cuda_src)
+    include_directories(${DAWN_DIR}/include ${DAWN_DIR}/build/gen/include)
+    message("WebGPU (Dawn) enabled: ${DAWN_LIB}")
+
+    # WGSL shaders -> generated headers holding raw string literals.
+    # CONFIGURE_DEPENDS so adding a shader to an already-configured tree creates its
+    # generation rule on the next build, rather than being silently omitted.
+    file(GLOB WGSL_SOURCES CONFIGURE_DEPENDS
+         ${CMAKE_CURRENT_SOURCE_DIR}/../src/webgpu_src/shaders/*.wgsl)
+    # metric_common.wgsl is a prelude prepended to the metric shaders, not a
+    # standalone module.
+    list(REMOVE_ITEM WGSL_SOURCES
+         ${CMAKE_CURRENT_SOURCE_DIR}/../src/webgpu_src/shaders/metric_common.wgsl)
+    set(WGSL_HEADERS)
+    foreach(_wgsl ${WGSL_SOURCES})
+        get_filename_component(_stem ${_wgsl} NAME_WE)
+        set(_hdr ${CMAKE_CURRENT_BINARY_DIR}/gen/wgsl/${_stem}.wgsl.h)
+        add_custom_command(
+            OUTPUT ${_hdr}
+            COMMAND ${CMAKE_COMMAND} -DIN=${_wgsl} -DOUT=${_hdr} -DVAR=k${_stem}WGSL
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_wgsl.cmake
+            DEPENDS ${_wgsl} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_wgsl.cmake
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../src/webgpu_src/shaders/metric_common.wgsl
+            COMMENT "Embedding ${_stem}.wgsl")
+        list(APPEND WGSL_HEADERS ${_hdr})
+    endforeach()
+    add_custom_target(wgsl_headers DEPENDS ${WGSL_HEADERS})
+    include_directories(${CMAKE_CURRENT_BINARY_DIR}/gen/wgsl)
+
+    # Sources of the WebGPU backend as it is ported, milestone by milestone.
+    SET(WEBGPU_SOURCES
+        ../src/webgpu_src/webgpu_context.cxx
+        ../src/webgpu_src/gpu_image.cxx
+        ../src/webgpu_src/resample_image.cxx
+        ../src/webgpu_src/warp_image.cxx
+        ../src/webgpu_src/quadratic_transform_image.cxx
+        ../src/webgpu_src/gaussian_smooth_image.cxx
+        ../src/webgpu_src/image_utilities.cxx
+        ../src/webgpu_src/reductions.cxx
+        ../src/webgpu_src/compose_fields.cxx
+        ../src/webgpu_src/invert_field.cxx
+        ../src/webgpu_src/compute_entropy.cxx
+        ../src/webgpu_src/compute_metric.cxx)
+
+    # M2 smoke test: adapter selection, allocation at validation scale, a kernel.
+    add_executable(webgpu_probe ../src/webgpu_src/webgpu_probe_main.cxx
+                                ../src/webgpu_src/webgpu_context.cxx)
+    add_dependencies(webgpu_probe wgsl_headers)
+    target_link_libraries(webgpu_probe ${DAWN_LIB} dl pthread)
+    # Dawn's C++ headers require C++20; the rest of the project builds at 14/17.
+    target_compile_definitions(webgpu_probe PRIVATE ${WEBGPU_DEFS})
+    target_include_directories(webgpu_probe BEFORE PRIVATE ${WEBGPU_INCS})
+    set_target_properties(webgpu_probe PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+    # The full pipeline on WebGPU: same main/ sources as the CUDA build, with the
+    # WebGPU backend swapped in behind the gpu_src shims.
+    add_executable(TORTOISEProcess_webgpu ../src/main/main.cxx ../src/main/register_dwi_to_b0.cxx
+        ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx
+        ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx
+        ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx ../src/tools/RotateBMatrix/rotate_bmatrix.cxx
+        ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx
+        ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/EPIREG.cxx
+        ../src/main/TORTOISE_parser.cxx ../src/main/run_drbuddi_stage.cxx
+        ../src/main/DRBUDDI_Diffeo.cxx ../src/main/drbuddi_image_utilities.cxx
+        ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx
+        ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx
+        ../src/main/create_mask.cxx ../src/cuda_src/register_dwi_to_b0_cuda.cxx
+        ${WEBGPU_SOURCES} ${SOURCES})
+    add_dependencies(TORTOISEProcess_webgpu wgsl_headers)
+    target_link_libraries(TORTOISEProcess_webgpu
+        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
+        Eigen3::Eigen ${Boost_LIBRARIES} ${DAWN_LIB}
+        ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a
+        -lz fftw3 dl pthread)
+    target_compile_definitions(TORTOISEProcess_webgpu PRIVATE ${WEBGPU_DEFS})
+    target_include_directories(TORTOISEProcess_webgpu BEFORE PRIVATE ${WEBGPU_INCS})
+    set_target_properties(TORTOISEProcess_webgpu PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+    # DRBUDDI standalone on WebGPU, mirroring the DRBUDDI_cuda target.
+    add_executable(DRBUDDI_webgpu ../src/tools/DRBUDDI/DRBUDDI_main.cxx
+        ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx
+        ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/run_drbuddi_stage.cxx
+        ../src/main/DRBUDDI_Diffeo.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx
+        ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx
+        ../src/main/create_mask.cxx ../src/main/drbuddi_image_utilities.cxx
+        ${WEBGPU_SOURCES} ${SOURCES})
+    add_dependencies(DRBUDDI_webgpu wgsl_headers)
+    target_link_libraries(DRBUDDI_webgpu
+        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
+        Eigen3::Eigen ${Boost_LIBRARIES} ${DAWN_LIB}
+        ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a
+        -lz fftw3 dl pthread)
+    target_compile_definitions(DRBUDDI_webgpu PUBLIC -DDRBUDDIALONE)
+    target_compile_definitions(DRBUDDI_webgpu PRIVATE ${WEBGPU_DEFS})
+    target_include_directories(DRBUDDI_webgpu BEFORE PRIVATE ${WEBGPU_INCS})
+    set_target_properties(DRBUDDI_webgpu PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+    # M3+: replay the captured CUDA golden vectors against the WebGPU kernels.
+    add_executable(webgpu_replay ../src/tools/GPUReplay/webgpu_replay_main.cxx ${WEBGPU_SOURCES})
+    add_dependencies(webgpu_replay wgsl_headers)
+    # ITK's IO factory registration pulls symbols across several static libs, so
+    # let the linker resolve them as a group rather than in one pass.
+    target_link_libraries(webgpu_replay
+        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
+        ${Boost_LIBRARIES} ${DAWN_LIB} dl pthread)
+    target_compile_definitions(webgpu_replay PRIVATE ${WEBGPU_DEFS})
+    target_include_directories(webgpu_replay BEFORE PRIVATE ${WEBGPU_INCS})
+    set_target_properties(webgpu_replay PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+ENDIF(USEWEBGPU)
+
+
+
 IF(USECUDA)
      include_directories(../src/cuda_src )
-     add_executable(TORTOISEProcess_cuda ../src/main/main.cxx ../src/main/register_dwi_to_b0.cxx    ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx  ../src/tools/RotateBMatrix/rotate_bmatrix.cxx  ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx  ../src/main/EPIREG.cxx ../src/main/TORTOISE_parser.cxx ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx  ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx  ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx ../src/cuda_src/register_dwi_to_b0_cuda.cxx ../src/cuda_src/quadratic_transform_image.cxx ../src/cuda_src/quadratic_transform_image.cu ../src/cuda_src/compute_entropy.cxx ../src/cuda_src/compute_entropy.cu  ${SOURCES} )
+     add_executable(TORTOISEProcess_cuda ../src/main/main.cxx ../src/main/register_dwi_to_b0.cxx    ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx  ../src/tools/RotateBMatrix/rotate_bmatrix.cxx  ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx  ../src/main/EPIREG.cxx ../src/main/TORTOISE_parser.cxx ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx  ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx  ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx ../src/cuda_src/register_dwi_to_b0_cuda.cxx ../src/cuda_src/quadratic_transform_image.cxx ../src/cuda_src/quadratic_transform_image.cu ../src/cuda_src/compute_entropy.cxx ../src/cuda_src/compute_entropy.cu  ${SOURCES} )
      target_include_directories(TORTOISEProcess_cuda   PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
      target_link_libraries(TORTOISEProcess_cuda  Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES}   fftw3 ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a   -static-libgcc -static-libstdc++ )
 
-     add_executable(DRBUDDI_cuda ../src/tools/DRBUDDI/DRBUDDI_main.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx   ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx   ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx    ${SOURCES} )
+     add_executable(gpu_replay ../src/tools/GPUReplay/gpu_replay_main.cxx ../src/cuda_src/quadratic_transform_image.cu ../src/cuda_src/quadratic_transform_image.cxx ../src/cuda_src/cuda_image.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/cuda_src/compute_entropy.cu ../src/cuda_src/compute_entropy.cxx ${SOURCES})
+     target_include_directories(gpu_replay PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+     target_link_libraries(gpu_replay Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES} fftw3 -static-libgcc -static-libstdc++)
+
+     add_executable(DRBUDDI_cuda ../src/tools/DRBUDDI/DRBUDDI_main.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx   ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx   ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx    ${SOURCES} )
      target_include_directories(DRBUDDI_cuda  PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
      target_link_libraries(DRBUDDI_cuda  ${ITK_LIBRARIES} ${Boost_LIBRARIES}    ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz    -static-libgcc -static-libstdc++)
      target_compile_definitions(DRBUDDI_cuda PUBLIC -DDRBUDDIALONE)
 
-     add_executable(DRTAMAS_cuda  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/drbuddi_image_utilities.cxx ../src/tools/DRTAMAS/compute_metric_dev.cu ../src/tools/DRTAMAS/compute_metric_dev.cxx   ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx ../src/tools/DRTAMAS/run_drtamas_stage.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cu   ../src/tools/DRTAMAS/DRTAMAS_Diffeo.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/cuda_image.cxx ../src/main/rigid_register_images.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/DRTAMAS/DRTAMAS_main.cxx ../src/tools/DRTAMAS/DRTAMAS.cxx ../src/tools/DRTAMAS/DRTAMAS_parser.cxx   ${SOURCES} )
+     add_executable(DRTAMAS_cuda  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/drbuddi_image_utilities.cxx ../src/tools/DRTAMAS/compute_metric_dev.cu ../src/tools/DRTAMAS/compute_metric_dev.cxx   ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx ../src/tools/DRTAMAS/run_drtamas_stage.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cu   ../src/tools/DRTAMAS/DRTAMAS_Diffeo.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/cuda_image.cxx ../src/main/rigid_register_images.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/DRTAMAS/DRTAMAS_main.cxx ../src/tools/DRTAMAS/DRTAMAS.cxx ../src/tools/DRTAMAS/DRTAMAS_parser.cxx   ${SOURCES} )
      target_include_directories(DRTAMAS_cuda   PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
      target_link_libraries(DRTAMAS_cuda  Eigen3::Eigen  ${ITK_LIBRARIES} ${Boost_LIBRARIES}  -static-libgcc -static-libstdc++ )
      set_target_properties(DRTAMAS_cuda PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/DRTAMAS")
@@ -201,9 +390,19 @@ IF(USECUDA)
 
 
 ELSE(USECUDA)
-    if(NOT QSIPREP)
+    # WebGPU cannot be fully static: Dawn dlopen()s the Vulkan loader at runtime,
+    # and a -static binary segfaults on the first dlopen.
+    if(NOT QSIPREP AND NOT USEWEBGPU)
         SET(CMAKE_EXE_LINKER_FLAGS "-static ")
     endif()
+    # Only the pure-CPU tree may build these. build_cpu and build_webgpu are both
+    # USECUDA=0, so both used to link TORTOISEProcess and DRBUDDI into the SAME
+    # shared bin/ paths - and revalidate.sh builds build_webgpu last, so the WebGPU
+    # tree silently won. `file bin/TORTOISEProcess` showed a dynamically linked
+    # binary, i.e. the WebGPU one, while finalize_run.sh attributed CPU provenance
+    # to build_cpu. The WebGPU tree builds TORTOISEProcess_webgpu / DRBUDDI_webgpu
+    # for its own use, so the plain duplicates were unused as well as harmful.
+    if(NOT USEWEBGPU)
     add_executable(TORTOISEProcess ../src/main/main.cxx  ../src/main/register_dwi_to_b0.cxx  ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx  ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx   ../src/tools/RotateBMatrix/rotate_bmatrix.cxx ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/EPIREG.cxx ../src/main/DRBUDDI_Diffeo.cxx ../src/main/run_drbuddi_stage.cxx ../src/main/drbuddi_image_utilities.cxx   ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/main/TORTOISE_parser.cxx  ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx ${SOURCES})
     target_link_libraries(TORTOISEProcess PRIVATE Eigen3::Eigen ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz fftw3 -static-libgcc -static-libstdc++)
 
@@ -215,6 +414,7 @@ ELSE(USECUDA)
      add_executable(Vol2SlRegistration   ../src/tools/Vol2SlRegistration/vol2sl_registration_main.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ${SOURCES})
      target_include_directories(Vol2SlRegistration   PRIVATE   )
      target_link_libraries(Vol2SlRegistration ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++)
+    endif()
 
 
 ENDIF(USECUDA)
@@ -608,3 +808,29 @@ IF(USE_VTK)
  cd    )
 endif(USE_VTK)
 
+# ---------------------------------------------------------------------------
+# Variant builds must not overwrite the reference binaries in the shared bin/.
+#
+# This is applied to EVERY executable in this directory, not to a hand-listed few.
+# An earlier version named only TORTOISEProcess_cuda and gpu_replay, which left a
+# variant tree free to clobber DRBUDDI_cuda, DRTAMAS_cuda, every WebGPU/CPU pipeline
+# target and the ~100 standalone tools - all of which every tree builds. The harness
+# resolves binaries by path and detects substitution by content hash, so a silently
+# replaced tool shows up as an unexplained staleness failure at best.
+#
+# Empty suffix for a reference build, so normal builds are unaffected.
+if ( NOT TORTOISE_BIN_SUFFIX STREQUAL "" )
+    get_property(_tortoise_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_t IN LISTS _tortoise_targets)
+        get_target_property(_type ${_t} TYPE)
+        if ( _type STREQUAL "EXECUTABLE" )
+            get_target_property(_on ${_t} OUTPUT_NAME)
+            if ( NOT _on )
+                set(_on ${_t})
+            endif()
+            set_target_properties(${_t} PROPERTIES OUTPUT_NAME "${_on}${TORTOISE_BIN_SUFFIX}")
+        endif()
+    endforeach()
+    list(LENGTH _tortoise_targets _n)
+    message(STATUS "Variant build: suffixed executables among ${_n} targets with '${TORTOISE_BIN_SUFFIX}'")
+endif()

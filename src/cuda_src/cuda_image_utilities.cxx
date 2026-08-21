@@ -2,6 +2,7 @@
 #define _CUDAIMAGEUTILITIES_CXX
 
 #include "cuda_image_utilities.h"
+#include "gpu_capture.h"
 
 
 
@@ -38,7 +39,17 @@ CUDAIMAGE::Pointer AnisotropicSmoothField(CUDAIMAGE::Pointer field, CUDAIMAGE::P
 
 void AddToUpdateField(CUDAIMAGE::Pointer updateField,CUDAIMAGE::Pointer  updateField_temp,float weight,bool normalize)
 {
+    gpucap::Rec cap("AddToUpdateField");
+    if(cap.on())
+    {
+    cap.param("weight",weight).param("normalize",(double)normalize);
+    cap.in("updateField",updateField).in("updateField_temp",updateField_temp);
+    }
+
     AddToUpdateField_cuda(updateField->getFloatdata(), updateField_temp->getFloatdata(),weight, updateField->sz,updateField->components_per_voxel ,normalize);
+    if(cap.on()) {
+    cap.out("updateField",updateField).save();
+    }
 }
 
 
@@ -69,20 +80,47 @@ float DotProduct(CUDAIMAGE::Pointer  field1,CUDAIMAGE::Pointer  field2)
 
 void ScaleUpdateField(CUDAIMAGE::Pointer  field,float scale_factor)
 {
+    gpucap::Rec cap("ScaleUpdateField");
+    if(cap.on())
+    {
+    cap.param("scale_factor",scale_factor).in("field",field);
+    }
+
     ScaleUpdateField_cuda(field->getFloatdata(), field->sz, field->spc, scale_factor );
+    if(cap.on()) {
+    cap.out("field",field).save();
+    }
 }
 
 
 
 void RestrictPhase(CUDAIMAGE::Pointer  field, float3 phase)
 {
+    gpucap::Rec cap("RestrictPhase");
+    if(cap.on())
+    {
+    cap.param("phase",phase).in("field",field);
+    }
+
     RestrictPhase_cuda(field->getFloatdata(),  field->sz,phase);
+    if(cap.on()) {
+    cap.out("field",field).save();
+    }
 }
 
 
 void ContrainDefFields(CUDAIMAGE::Pointer  ufield, CUDAIMAGE::Pointer  dfield)
 {
+    gpucap::Rec cap("ContrainDefFields");
+    if(cap.on())
+    {
+    cap.in("ufield",ufield).in("dfield",dfield);
+    }
+
     ContrainDefFields_cuda(ufield->getFloatdata(),dfield->getFloatdata(),  ufield->sz);
+    if(cap.on()) {
+    cap.out("ufield",ufield).out("dfield",dfield).save();
+    }
 }
 
 
@@ -170,6 +208,12 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     cudaMemset3D(d_output,0,extent);
 
 
+    gpucap::Rec cap("ComposeFields");
+    if(cap.on())
+    {
+    cap.in("main_field",main_field).in("update_field",update_field);
+    }
+
     ComposeFields_cuda(main_field->getFloatdata(),update_field->getFloatdata(),
                    main_field->sz,
                    main_field->spc,
@@ -185,6 +229,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     output->spc=main_field->spc;
     output->components_per_voxel= main_field->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 
 
@@ -206,6 +254,12 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
         cudaMemcpy3D(&copyParams);
 
 
+    gpucap::Rec cap("NegateField");
+    if(cap.on())
+    {
+    cap.in("field",field);
+    }
+
         NegateField_cuda(d_output,  field->sz);
 
 
@@ -217,6 +271,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     output->spc=field->spc;
     output->components_per_voxel= field->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 }
 
@@ -229,6 +287,12 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
 
+    gpucap::Rec cap("AddImages");
+    if(cap.on())
+    {
+    cap.in("im1",im1).in("im2",im2);
+    }
+
     AddImages_cuda(im1->getFloatdata(),im2->getFloatdata(), d_output,  im1->sz,im1->components_per_voxel);
 
     CUDAIMAGE::Pointer output = CUDAIMAGE::New();
@@ -238,6 +302,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     output->spc=im1->spc;
     output->components_per_voxel= im1->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 }
 
@@ -249,6 +317,12 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
 
+    gpucap::Rec cap("MultiplyImage");
+    if(cap.on())
+    {
+    cap.param("factor",factor).in("im1",im1);
+    }
+
     MultiplyImage_cuda(im1->getFloatdata(),factor, d_output,  im1->sz,im1->components_per_voxel);
 
     CUDAIMAGE::Pointer output = CUDAIMAGE::New();
@@ -258,6 +332,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     output->spc=im1->spc;
     output->components_per_voxel= im1->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 }
 
@@ -283,6 +361,13 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
         cudaMemcpy3D(&copyParams);
     }
 
+    gpucap::Rec cap("InvertField");
+    if(cap.on())
+    {
+    if(initial_estimate) cap.in("initial_estimate",initial_estimate);
+    cap.in("field",field);
+    }
+
     InvertField_cuda(field->getFloatdata(),
                    field->sz,
                    field->spc,
@@ -300,6 +385,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     output->spc=field->spc;
     output->components_per_voxel= field->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 
 }
@@ -313,6 +402,12 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
      cudaMalloc3D(&d_output, extent);
      cudaMemset3D(d_output,0,extent);
 
+    gpucap::Rec cap("PreprocessImage");
+    if(cap.on())
+    {
+    cap.param("low_val",low_val).param("up_val",up_val).in("img",img);
+    }
+
      PreprocessImage_cuda(img->getFloatdata(),
                           img->sz,
                           low_val, up_val,
@@ -325,6 +420,10 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
      output->spc=img->spc;
      output->components_per_voxel= 1;
      output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+     cap.out("output",output).save();
+    }
+
      return output;
  }
 
@@ -344,6 +443,12 @@ std::vector<CUDAIMAGE::Pointer> ComputeImageGradientImg(CUDAIMAGE::Pointer img)
     cudaMalloc3D(&d_output_z, extent);
     cudaMemset3D(d_output_z,0,extent);
 
+
+    gpucap::Rec cap("ComputeImageGradientImg");
+    if(cap.on())
+    {
+    cap.in("img",img);
+    }
 
     ComputeImageGradient_cuda(img->getFloatdata(), img->sz,img->spc,
                               img->dir(0,0),img->dir(0,1),img->dir(0,2),img->dir(1,0),img->dir(1,1),img->dir(1,2),img->dir(2,0),img->dir(2,1),img->dir(2,2),
@@ -377,6 +482,10 @@ std::vector<CUDAIMAGE::Pointer> ComputeImageGradientImg(CUDAIMAGE::Pointer img)
     output.push_back(outputx);
     output.push_back(outputy);
     output.push_back(outputz);
+    if(cap.on()) {
+    cap.out("grad_x",outputx).out("grad_y",outputy).out("grad_z",outputz).save();
+    }
+
     return output;
 
 }
@@ -450,6 +559,12 @@ CUDAIMAGE::Pointer MultiplyImages(CUDAIMAGE::Pointer im1, CUDAIMAGE::Pointer im2
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
 
+    gpucap::Rec cap("MultiplyImages");
+    if(cap.on())
+    {
+    cap.in("im1",im1).in("im2",im2);
+    }
+
     MultiplyImages_cuda(im1->getFloatdata(),im2->getFloatdata(), d_output,  im1->sz,im1->components_per_voxel);
 
     CUDAIMAGE::Pointer output = CUDAIMAGE::New();
@@ -459,6 +574,10 @@ CUDAIMAGE::Pointer MultiplyImages(CUDAIMAGE::Pointer im1, CUDAIMAGE::Pointer im2
     output->spc=im1->spc;
     output->components_per_voxel= im1->components_per_voxel;
     output->SetFloatDataPointer( d_output);
+    if(cap.on()) {
+    cap.out("output",output).save();
+    }
+
     return output;
 
 }
