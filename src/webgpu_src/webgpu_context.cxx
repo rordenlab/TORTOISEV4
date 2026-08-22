@@ -264,6 +264,24 @@ bool Init()
 
     wgpu::DeviceDescriptor ddesc{};
     ddesc.requiredLimits = &want;
+#ifdef __APPLE__
+    // Required before a shader module may request strict math - see Pipeline().
+    static const wgpu::FeatureName kStrictMathFeature =
+        wgpu::FeatureName::ShaderModuleCompilationOptions;
+    if(adapter.HasFeature(kStrictMathFeature))
+    {
+        ddesc.requiredFeatures     = &kStrictMathFeature;
+        ddesc.requiredFeatureCount = 1;
+    }
+    else
+    {
+        // Relaxed math measurably breaks the 1e-5 gate on the guarded ops; running
+        // anyway would report a tolerance failure as if it were a porting fault.
+        std::cerr << "WebGPU: adapter lacks ShaderModuleCompilationOptions, so strict "
+                     "math cannot be requested - aborting" << std::endl;
+        exit(1);
+    }
+#endif
     ddesc.SetUncapturedErrorCallback(
         [](const wgpu::Device &, wgpu::ErrorType type, wgpu::StringView msg) {
             g_errors++;
@@ -308,6 +326,11 @@ wgpu::Device       Device() { Init(); return g_device; }
 wgpu::Queue        Queue()  { Init(); return g_queue; }
 uint64_t           BytesAllocatedCumulative() { return g_bytes; }
 uint64_t           ErrorCount() { return g_errors; }
+
+bool TexFilterEmulation()
+{
+    return std::getenv("TORTOISE_WEBGPU_CUDA_TEXFILTER") != nullptr;
+}
 
 // Checked lazily by the one caller that needs more than the WebGPU default of 8,
 // rather than at startup: a run whose metric set never reaches CCJacS is
@@ -532,6 +555,16 @@ wgpu::ComputePipeline Pipeline(const std::string &key, const char *wgsl,
     src.code = wgsl;
     wgpu::ShaderModuleDescriptor smd{};
     smd.nextInChain = &src;
+#ifdef __APPLE__
+    // Dawn's Metal backend emits `#pragma METAL fp math_mode(relaxed)` unless strict
+    // math is requested (ShaderModuleMTL.mm), which lets the shader compiler reassociate
+    // and contract. Measured cost of leaving it relaxed: ComposeFields and InvertField
+    // exceed the 1e-5 gate on 6.2% of elements instead of Linux's 0.05%. Apple-only
+    // because the Linux/Vulkan configuration is validated and cannot be re-verified here.
+    wgpu::ShaderModuleCompilationOptions strict{};
+    strict.strictMath = true;
+    src.nextInChain = &strict;
+#endif
     const uint64_t errors_before_module = g_errors.load();
     wgpu::ShaderModule mod = g_device.CreateShaderModule(&smd);
 

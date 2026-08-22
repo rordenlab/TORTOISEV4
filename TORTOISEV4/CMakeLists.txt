@@ -15,8 +15,17 @@ endif()
 if ( NOT DEFINED USEWEBGPU)
     SET(USEWEBGPU 0)
 endif()
+if ( NOT DEFINED USEMETAL)
+    SET(USEMETAL 0)
+endif()
 if ( USECUDA AND USEWEBGPU )
     message(FATAL_ERROR "USECUDA and USEWEBGPU are mutually exclusive; configure one backend per build tree")
+endif()
+if ( USEMETAL AND (USECUDA OR USEWEBGPU) )
+    message(FATAL_ERROR "USEMETAL is mutually exclusive with USECUDA and USEWEBGPU; configure one backend per build tree")
+endif()
+if ( USEMETAL AND NOT APPLE )
+    message(FATAL_ERROR "USEMETAL requires macOS")
 endif()
 
 # Validation-only. Routes every DWI volume through the GPU registration path
@@ -98,7 +107,13 @@ set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../bin/lib/ )
 # -Xcompiler forwarding - but src/cuda_src/*.cxx host wrappers ARE compiled with these
 # flags, so `gpu_replay --all` must be re-checked after any change here.
 IF(NOT DEFINED TORTOISE_ARCH)
-    SET(TORTOISE_ARCH "x86-64-v3")
+    # arm64 has no x86-64-v3. NOTE this means macOS host floating-point results
+    # differ from the Linux reference before any GPU kernel runs - record it in the run artefact.
+    IF(APPLE)
+        SET(TORTOISE_ARCH "none")
+    ELSE()
+        SET(TORTOISE_ARCH "x86-64-v3")
+    ENDIF()
 ENDIF()
 IF(TORTOISE_ARCH STREQUAL "none")
     SET(TORTOISE_ARCH_FLAG "")
@@ -107,7 +122,47 @@ ELSE()
 ENDIF()
 message(STATUS "TORTOISE host arch flag: ${TORTOISE_ARCH_FLAG}")
 
-IF(USEOPENMP)
+IF(APPLE AND USEOPENMP)
+    # Apple clang has no bundled OpenMP runtime; Homebrew libomp supplies it.
+    # std::bind2nd was deprecated in C++11 and REMOVED in C++17, but ITK 5.4+ requires
+    # C++17 on Apple LLVM, so the two constraints collide. libc++ keeps the removed
+    # binders behind this macro. Three upstream call sites use it
+    # (DTIModel.cxx:2031,2841 and estimate_tensor_wlls.cxx:274) and are left untouched -
+    # rewriting upstream source to a lambda would be a change this port has no remit for.
+    # ...and the WebGPU targets build at C++20 (Dawn's headers require it), where
+    # std::plus's first_argument_type/result_type typedefs bind2nd needs were removed
+    # as well. The Metal targets are C++17, where they are merely deprecated.
+    add_definitions(-D_LIBCPP_ENABLE_CXX17_REMOVED_BINDERS
+                    -D_LIBCPP_ENABLE_CXX20_REMOVED_BINDER_TYPEDEFS)
+    # Size: -ffunction-sections/-fdata-sections put each function and object in its own
+    # section so ld64's -dead_strip can drop them individually rather than per .o.
+    # NOTE this only affects OUR translation units - ITK's 111 static archives (68 MB)
+    # were built without them, so the linker's granularity there stays per-object.
+    add_compile_options(-ffunction-sections -fdata-sections)
+    add_link_options(-Wl,-dead_strip)
+
+    # The vendored betokan archive is Linux x86-64 with no source in the tree, so it
+    # cannot be linked on arm64. create_mask.cxx's __APPLE__ branch shells out to the
+    # user's FSL bet2 instead (CLAUDE.md 6.4), so there is nothing to link here.
+    set(BETOKAN_LIB "")
+    set(EXCLUDE_ZLIB_FLAG "")   # -Wl,--exclude-libs is GNU ld only; ld64 rejects it
+    # GCC-only; Apple clang rejects them outright.
+    set(STATIC_CXX_LIBS "")
+
+    # FFTW is a Homebrew keg, not on the default search path.
+    if(DEFINED FFTW_ROOT)
+        include_directories(${FFTW_ROOT}/include)
+        link_directories(${FFTW_ROOT}/lib)
+    endif()
+    SET(OMP_FLAGS "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include")
+    # ITK 5.4's itkMacro.h hard-errors below C++17 on Apple LLVM. Measured: the tree's
+    # headers compile clean at 17 against Homebrew ITK 5.4.5, so no ITK 6 source build.
+    SET(CMAKE_CXX_FLAGS "${TORTOISE_ARCH_FLAG} ${OMP_FLAGS} -std=c++17 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    SET(CMAKE_C_FLAGS   "${TORTOISE_ARCH_FLAG} ${OMP_FLAGS} -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    link_directories(/opt/homebrew/opt/libomp/lib)
+    link_libraries(omp)
+    add_definitions(-DUSE_OPENMP)
+ELSEIF(USEOPENMP)
     SET(CMAKE_CXX_FLAGS "${TORTOISE_ARCH_FLAG} -fopenmp -std=c++14 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
     SET(CMAKE_C_FLAGS "${TORTOISE_ARCH_FLAG} -fopenmp -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
     add_definitions(-DUSE_OPENMP)
@@ -125,7 +180,13 @@ set(Boost_NO_BOOST_CMAKE ON)
 set(BOOST_ROOT /usr/local/boost186)
 set(Boost_LIBRARY_DIRS /usr/local/boost186/lib)
 set(Boost_INCLUDE_DIRS /usr/local/boost186/include)
-find_package(Boost COMPONENTS iostreams filesystem system REQUIRED)
+# Boost.System has been header-only since 1.69 and Homebrew's 1.90 ships no stub
+# library, so requesting it as a component fails on macOS. It contributes no symbols.
+if(APPLE)
+    find_package(Boost COMPONENTS iostreams filesystem REQUIRED)
+else()
+    find_package(Boost COMPONENTS iostreams filesystem system REQUIRED)
+endif()
 
 if(Boost_FOUND)
   include_directories(${Boost_INCLUDE_DIRS})
@@ -212,6 +273,124 @@ endif()
 set(SOURCES ../src/main/defines.cxx  ../src/main/TORTOISE_global.cxx ../src/main/antsCommandLineParser.cxx ../src/main/antsCommandLineOption.cxx  ../src/utilities/TORTOISE_Utilities.cxx ../src/utilities/extract_3Dvolume_from_4D.cxx  ../src/utilities/read_3Dvolume_from_4D.cxx ../src/utilities/read_bmatrix_file.cxx ../src/utilities/math_utilities.cxx ../src/external_src/cmpfit-1.3a/mpfit.c)
 include_directories(../src/main)
 
+if(NOT DEFINED EXCLUDE_ZLIB_FLAG)
+    set(EXCLUDE_ZLIB_FLAG -Wl,--exclude-libs,libitkzlib-5.4.a)
+endif()
+if(NOT DEFINED STATIC_CXX_LIBS)
+    set(STATIC_CXX_LIBS -static-libgcc -static-libstdc++)
+endif()
+if(NOT DEFINED BETOKAN_LIB)
+    set(BETOKAN_LIB ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a)
+endif()
+
+IF(USEMETAL)
+    set(METAL_DEFS USEMETAL USEGPU)
+    # metal_src holds one header per interface and must shadow cuda_src, whose
+    # directory is still needed for the backend-neutral sources living there.
+    set(METAL_INCS ${CMAKE_CURRENT_SOURCE_DIR}/../src/gpu_src
+                   ${CMAKE_CURRENT_SOURCE_DIR}/../src/cuda_src)
+    find_library(METAL_FW Metal)
+    find_library(FOUNDATION_FW Foundation)
+    set(METAL_FRAMEWORKS ${METAL_FW} ${FOUNDATION_FW})
+    message("Metal backend enabled")
+
+    # .metal shaders -> generated headers holding raw string literals, by the same
+    # script the WGSL sources use.
+    file(GLOB MSL_SOURCES CONFIGURE_DEPENDS
+         ${CMAKE_CURRENT_SOURCE_DIR}/../src/metal_src/shaders/*.metal)
+    # metric_common.metal is a prelude prepended to the metric shaders, not a
+    # standalone module - and it must stay in every DEPENDS or editing it leaves the
+    # generated headers stale while the build reports success (CLAUDE.md 6.3).
+    set(MSL_PRELUDE ${CMAKE_CURRENT_SOURCE_DIR}/../src/metal_src/shaders/metric_common.metal)
+    list(REMOVE_ITEM MSL_SOURCES ${MSL_PRELUDE})
+    set(MSL_HEADERS)
+    foreach(_msl ${MSL_SOURCES})
+        get_filename_component(_stem ${_msl} NAME_WE)
+        set(_hdr ${CMAKE_CURRENT_BINARY_DIR}/gen/msl/${_stem}.metal.h)
+        add_custom_command(
+            OUTPUT ${_hdr}
+            COMMAND ${CMAKE_COMMAND} -DIN=${_msl} -DOUT=${_hdr} -DVAR=k${_stem}MSL
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_wgsl.cmake
+            DEPENDS ${_msl} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_wgsl.cmake ${MSL_PRELUDE}
+            COMMENT "Embedding ${_stem}.metal")
+        list(APPEND MSL_HEADERS ${_hdr})
+    endforeach()
+    add_custom_target(msl_headers DEPENDS ${MSL_HEADERS})
+    include_directories(${CMAKE_CURRENT_BINARY_DIR}/gen/msl)
+
+    # Sources of the Metal backend as it is ported, milestone by milestone.
+    SET(METAL_SOURCES
+        ../src/metal_src/metal_context.mm
+        ../src/metal_src/gpu_image.mm
+        ../src/metal_src/image_utilities.mm
+        ../src/metal_src/reductions.mm
+        ../src/metal_src/compose_fields.mm
+        ../src/metal_src/invert_field.mm
+        ../src/metal_src/compute_entropy.mm
+        ../src/metal_src/resample_image.mm
+        ../src/metal_src/warp_image.mm
+        ../src/metal_src/quadratic_transform_image.mm
+        ../src/metal_src/gaussian_smooth_image.mm
+        ../src/metal_src/compute_metric.mm)
+
+    # M1 smoke test: device selection, allocation at validation scale, a kernel.
+    add_executable(metal_probe ../src/metal_src/metal_probe_main.mm
+                               ../src/metal_src/metal_context.mm)
+    add_dependencies(metal_probe msl_headers)
+    target_link_libraries(metal_probe ${METAL_FRAMEWORKS})
+    target_compile_definitions(metal_probe PRIVATE ${METAL_DEFS})
+    target_include_directories(metal_probe BEFORE PRIVATE ${METAL_INCS})
+    set_target_properties(metal_probe PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+    # M6: the full pipeline on Metal. Same main/ sources as the CUDA and WebGPU
+    # builds, with the Metal backend swapped in behind the gpu_src shims.
+    # bet comes from the user's FSL install at runtime (see create_mask.cxx), so
+    # unlike the Linux targets there is no libbetokan to link.
+    add_executable(TORTOISEProcess_metal ../src/main/main.cxx ../src/main/register_dwi_to_b0.cxx
+        ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx
+        ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx
+        ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx ../src/tools/RotateBMatrix/rotate_bmatrix.cxx
+        ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx
+        ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/EPIREG.cxx
+        ../src/main/TORTOISE_parser.cxx ../src/main/run_drbuddi_stage.cxx
+        ../src/main/DRBUDDI_Diffeo.cxx ../src/main/drbuddi_image_utilities.cxx
+        ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx
+        ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx
+        ../src/main/create_mask.cxx ../src/cuda_src/register_dwi_to_b0_cuda.cxx
+        ${METAL_SOURCES} ${SOURCES})
+    add_dependencies(TORTOISEProcess_metal msl_headers)
+    target_link_libraries(TORTOISEProcess_metal
+        ${ITK_LIBRARIES} Eigen3::Eigen ${Boost_LIBRARIES} ${METAL_FRAMEWORKS}
+        -lz fftw3)
+    target_compile_definitions(TORTOISEProcess_metal PRIVATE ${METAL_DEFS})
+    target_include_directories(TORTOISEProcess_metal BEFORE PRIVATE ${METAL_INCS})
+    set_target_properties(TORTOISEProcess_metal PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+    add_executable(DRBUDDI_metal ../src/tools/DRBUDDI/DRBUDDI_main.cxx
+        ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx
+        ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/run_drbuddi_stage.cxx
+        ../src/main/DRBUDDI_Diffeo.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx
+        ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx
+        ../src/main/create_mask.cxx ../src/main/drbuddi_image_utilities.cxx
+        ${METAL_SOURCES} ${SOURCES})
+    add_dependencies(DRBUDDI_metal msl_headers)
+    target_link_libraries(DRBUDDI_metal
+        ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${METAL_FRAMEWORKS} -lz fftw3)
+    target_compile_definitions(DRBUDDI_metal PUBLIC -DDRBUDDIALONE)
+    target_compile_definitions(DRBUDDI_metal PRIVATE ${METAL_DEFS})
+    target_include_directories(DRBUDDI_metal BEFORE PRIVATE ${METAL_INCS})
+    set_target_properties(DRBUDDI_metal PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+    # M2+: the same replay source as webgpu_replay, bound to the Metal backend by
+    # src/gpu_src/gpu_backend.h. One harness, two executables.
+    add_executable(metal_replay ../src/tools/GPUReplay/webgpu_replay_main.cxx ${METAL_SOURCES})
+    add_dependencies(metal_replay msl_headers)
+    target_link_libraries(metal_replay ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${METAL_FRAMEWORKS})
+    target_compile_definitions(metal_replay PRIVATE ${METAL_DEFS})
+    target_include_directories(metal_replay BEFORE PRIVATE ${METAL_INCS})
+    set_target_properties(metal_replay PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+ENDIF(USEMETAL)
+
 IF(USEWEBGPU)
     # Dawn (WebGPU). Built separately by tortoise_libraries/build_dawn.sh, which
     # pins the revision in dawn.pin. Vulkan backend only - the GL backends are
@@ -240,6 +419,23 @@ IF(USEWEBGPU)
     # USEGPU is set on the command line rather than via defines.h because several
     # files use #ifdef USEGPU without including it; an invisible macro would
     # silently compile the GPU branch out and fall back to CPU.
+    # Apple ld64 has neither --start-group nor libdl; CMAKE_DL_LIBS is empty there.
+    if(APPLE)
+        set(GRP_START "")
+        set(GRP_END "")
+        find_library(METAL_FW Metal)
+        find_library(QUARTZCORE_FW QuartzCore)
+        find_library(IOSURFACE_FW IOSurface)
+        find_library(FOUNDATION_FW Foundation)
+        find_library(IOKIT_FW IOKit)
+        find_library(COREFOUNDATION_FW CoreFoundation)
+        set(DAWN_PLATFORM_LIBS ${METAL_FW} ${QUARTZCORE_FW} ${IOSURFACE_FW}
+                               ${FOUNDATION_FW} ${IOKIT_FW} ${COREFOUNDATION_FW})
+    else()
+        set(GRP_START "-Wl,--start-group")
+        set(GRP_END "-Wl,--end-group")
+        set(DAWN_PLATFORM_LIBS "")
+    endif()
     set(WEBGPU_DEFS USEWEBGPU USEGPU)
     # gpu_src holds one shim per backend interface and must shadow cuda_src, whose
     # directory is still needed for the backend-neutral sources that live there.
@@ -292,7 +488,7 @@ IF(USEWEBGPU)
     add_executable(webgpu_probe ../src/webgpu_src/webgpu_probe_main.cxx
                                 ../src/webgpu_src/webgpu_context.cxx)
     add_dependencies(webgpu_probe wgsl_headers)
-    target_link_libraries(webgpu_probe ${DAWN_LIB} dl pthread)
+    target_link_libraries(webgpu_probe ${DAWN_LIB} ${DAWN_PLATFORM_LIBS} ${CMAKE_DL_LIBS} pthread)
     # Dawn's C++ headers require C++20; the rest of the project builds at 14/17.
     target_compile_definitions(webgpu_probe PRIVATE ${WEBGPU_DEFS})
     target_include_directories(webgpu_probe BEFORE PRIVATE ${WEBGPU_INCS})
@@ -314,10 +510,10 @@ IF(USEWEBGPU)
         ${WEBGPU_SOURCES} ${SOURCES})
     add_dependencies(TORTOISEProcess_webgpu wgsl_headers)
     target_link_libraries(TORTOISEProcess_webgpu
-        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
+        ${GRP_START} ${ITK_LIBRARIES} ${GRP_END}
         Eigen3::Eigen ${Boost_LIBRARIES} ${DAWN_LIB}
-        ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a
-        -lz fftw3 dl pthread)
+        ${BETOKAN_LIB}
+        -lz fftw3 ${DAWN_PLATFORM_LIBS} ${CMAKE_DL_LIBS} pthread)
     target_compile_definitions(TORTOISEProcess_webgpu PRIVATE ${WEBGPU_DEFS})
     target_include_directories(TORTOISEProcess_webgpu BEFORE PRIVATE ${WEBGPU_INCS})
     set_target_properties(TORTOISEProcess_webgpu PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
@@ -332,10 +528,10 @@ IF(USEWEBGPU)
         ${WEBGPU_SOURCES} ${SOURCES})
     add_dependencies(DRBUDDI_webgpu wgsl_headers)
     target_link_libraries(DRBUDDI_webgpu
-        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
+        ${GRP_START} ${ITK_LIBRARIES} ${GRP_END}
         Eigen3::Eigen ${Boost_LIBRARIES} ${DAWN_LIB}
-        ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a
-        -lz fftw3 dl pthread)
+        ${BETOKAN_LIB}
+        -lz fftw3 ${DAWN_PLATFORM_LIBS} ${CMAKE_DL_LIBS} pthread)
     target_compile_definitions(DRBUDDI_webgpu PUBLIC -DDRBUDDIALONE)
     target_compile_definitions(DRBUDDI_webgpu PRIVATE ${WEBGPU_DEFS})
     target_include_directories(DRBUDDI_webgpu BEFORE PRIVATE ${WEBGPU_INCS})
@@ -347,8 +543,8 @@ IF(USEWEBGPU)
     # ITK's IO factory registration pulls symbols across several static libs, so
     # let the linker resolve them as a group rather than in one pass.
     target_link_libraries(webgpu_replay
-        -Wl,--start-group ${ITK_LIBRARIES} -Wl,--end-group
-        ${Boost_LIBRARIES} ${DAWN_LIB} dl pthread)
+        ${GRP_START} ${ITK_LIBRARIES} ${GRP_END}
+        ${Boost_LIBRARIES} ${DAWN_LIB} ${DAWN_PLATFORM_LIBS} ${CMAKE_DL_LIBS} pthread)
     target_compile_definitions(webgpu_replay PRIVATE ${WEBGPU_DEFS})
     target_include_directories(webgpu_replay BEFORE PRIVATE ${WEBGPU_INCS})
     set_target_properties(webgpu_replay PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
@@ -360,20 +556,20 @@ IF(USECUDA)
      include_directories(../src/cuda_src )
      add_executable(TORTOISEProcess_cuda ../src/main/main.cxx ../src/main/register_dwi_to_b0.cxx    ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx  ../src/tools/RotateBMatrix/rotate_bmatrix.cxx  ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx  ../src/main/EPIREG.cxx ../src/main/TORTOISE_parser.cxx ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx  ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx  ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx ../src/cuda_src/register_dwi_to_b0_cuda.cxx ../src/cuda_src/quadratic_transform_image.cxx ../src/cuda_src/quadratic_transform_image.cu ../src/cuda_src/compute_entropy.cxx ../src/cuda_src/compute_entropy.cu  ${SOURCES} )
      target_include_directories(TORTOISEProcess_cuda   PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(TORTOISEProcess_cuda  Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES}   fftw3 ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a   -static-libgcc -static-libstdc++ )
+     target_link_libraries(TORTOISEProcess_cuda  Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES}   fftw3 ${BETOKAN_LIB}   ${STATIC_CXX_LIBS} )
 
      add_executable(gpu_replay ../src/tools/GPUReplay/gpu_replay_main.cxx ../src/cuda_src/quadratic_transform_image.cu ../src/cuda_src/quadratic_transform_image.cxx ../src/cuda_src/cuda_image.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/cuda_src/compute_entropy.cu ../src/cuda_src/compute_entropy.cxx ${SOURCES})
      target_include_directories(gpu_replay PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(gpu_replay Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES} fftw3 -static-libgcc -static-libstdc++)
+     target_link_libraries(gpu_replay Eigen3::Eigen ${ITK_LIBRARIES} ${Boost_LIBRARIES} fftw3 ${STATIC_CXX_LIBS})
 
      add_executable(DRBUDDI_cuda ../src/tools/DRBUDDI/DRBUDDI_main.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx   ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx   ../src/cuda_src/cuda_image.cxx  ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/main/run_drbuddi_stage.cxx ../src/main/run_drbuddi_stage_TVVF.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx  ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/main/DRBUDDI_Diffeo.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx    ${SOURCES} )
      target_include_directories(DRBUDDI_cuda  PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(DRBUDDI_cuda  ${ITK_LIBRARIES} ${Boost_LIBRARIES}    ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz    -static-libgcc -static-libstdc++)
+     target_link_libraries(DRBUDDI_cuda  ${ITK_LIBRARIES} ${Boost_LIBRARIES}    ${BETOKAN_LIB} -lz    ${STATIC_CXX_LIBS})
      target_compile_definitions(DRBUDDI_cuda PUBLIC -DDRBUDDIALONE)
 
      add_executable(DRTAMAS_cuda  ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/drbuddi_image_utilities.cxx ../src/tools/DRTAMAS/compute_metric_dev.cu ../src/tools/DRTAMAS/compute_metric_dev.cxx   ../src/cuda_src/compute_metric.cu ../src/cuda_src/compute_metric.cxx ../src/cuda_src/warp_image.cu ../src/cuda_src/warp_image.cxx  ../src/cuda_src/gaussian_smooth_image.cu ../src/cuda_src/gaussian_smooth_image.cxx ../src/tools/DRTAMAS/run_drtamas_stage.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities.cu   ../src/tools/DRTAMAS/DRTAMAS_Diffeo.cxx ../src/cuda_src/resample_image.cu ../src/cuda_src/resample_image.cxx ../src/cuda_src/cuda_image_utilities.cu ../src/cuda_src/cuda_image_utilities.cxx ../src/cuda_src/gpu_capture.cxx ../src/cuda_src/cuda_image.cxx ../src/main/rigid_register_images.cxx ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/DRTAMAS/DRTAMAS_main.cxx ../src/tools/DRTAMAS/DRTAMAS.cxx ../src/tools/DRTAMAS/DRTAMAS_parser.cxx   ${SOURCES} )
      target_include_directories(DRTAMAS_cuda   PRIVATE    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(DRTAMAS_cuda  Eigen3::Eigen  ${ITK_LIBRARIES} ${Boost_LIBRARIES}  -static-libgcc -static-libstdc++ )
+     target_link_libraries(DRTAMAS_cuda  Eigen3::Eigen  ${ITK_LIBRARIES} ${Boost_LIBRARIES}  ${STATIC_CXX_LIBS} )
      set_target_properties(DRTAMAS_cuda PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/DRTAMAS")
 
 
@@ -412,7 +608,7 @@ IF(USECUDA)
 ELSE(USECUDA)
     # WebGPU cannot be fully static: Dawn dlopen()s the Vulkan loader at runtime,
     # and a -static binary segfaults on the first dlopen.
-    if(NOT QSIPREP AND NOT USEWEBGPU)
+    if(NOT QSIPREP AND NOT USEWEBGPU AND NOT APPLE)
         SET(CMAKE_EXE_LINKER_FLAGS "-static ")
     endif()
     # Only the pure-CPU tree may build these. build_cpu and build_webgpu are both
@@ -422,25 +618,25 @@ ELSE(USECUDA)
     # binary, i.e. the WebGPU one, while finalize_run.sh attributed CPU provenance
     # to build_cpu. The WebGPU tree builds TORTOISEProcess_webgpu / DRBUDDI_webgpu
     # for its own use, so the plain duplicates were unused as well as harmful.
-    if(NOT USEWEBGPU)
+    if(NOT USEWEBGPU AND NOT USEMETAL)
     add_executable(TORTOISEProcess ../src/main/main.cxx  ../src/main/register_dwi_to_b0.cxx  ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx  ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateMAPMRI/MAPMRIModel.cxx   ../src/tools/RotateBMatrix/rotate_bmatrix.cxx ../src/main/FINALDATA.cxx ../src/main/TORTOISE.cxx ../src/main/DIFFPREP.cxx ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx ../src/main/EPIREG.cxx ../src/main/DRBUDDI_Diffeo.cxx ../src/main/run_drbuddi_stage.cxx ../src/main/drbuddi_image_utilities.cxx   ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/main/TORTOISE_parser.cxx  ../src/tools/gradnonlin/init_iso_gw.cxx ../src/tools/gradnonlin/gradcal.cxx ${SOURCES})
-    target_link_libraries(TORTOISEProcess PRIVATE Eigen3::Eigen ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz fftw3 -static-libgcc -static-libstdc++)
+    target_link_libraries(TORTOISEProcess PRIVATE Eigen3::Eigen ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${BETOKAN_LIB} -lz fftw3 ${STATIC_CXX_LIBS})
 
     add_executable(DRBUDDI ../src/tools/DRBUDDI/DRBUDDI_main.cxx ../src/tools/DRBUDDI/DRBUDDI_parserBase.cxx ../src/tools/EstimateTensor/DTIModel.cxx   ../src/main/DRBUDDI.cxx ../src/main/DRBUDDIBase.cxx   ../src/main/run_drbuddi_stage.cxx ../src/main/DRBUDDI_Diffeo.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ../src/main/rigid_register_images.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls.cxx ../src/main/create_mask.cxx  ../src/main/drbuddi_image_utilities.cxx  ${SOURCES} )
-    target_link_libraries(DRBUDDI  PRIVATE ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz fftw3 -static-libgcc -static-libstdc++)
-    target_link_libraries(DRBUDDI PRIVATE -Wl,--exclude-libs,libitkzlib-5.4.a)
+    target_link_libraries(DRBUDDI  PRIVATE ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${BETOKAN_LIB} -lz fftw3 ${STATIC_CXX_LIBS})
+    target_link_libraries(DRBUDDI PRIVATE ${EXCLUDE_ZLIB_FLAG})
 
 
      add_executable(Vol2SlRegistration   ../src/tools/Vol2SlRegistration/vol2sl_registration_main.cxx ../src/tools/ResampleDWIs/resample_dwis.cxx ${SOURCES})
      target_include_directories(Vol2SlRegistration   PRIVATE   )
-     target_link_libraries(Vol2SlRegistration ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++)
+     target_link_libraries(Vol2SlRegistration ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${STATIC_CXX_LIBS})
     endif()
 
 
 ENDIF(USECUDA)
 
 add_executable(CreateMask ../src/tools/CreateMask/create_mask_main.cxx ../src/main/create_mask.cxx ../src/main/defines.cxx)
-target_link_libraries(CreateMask PRIVATE ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${CMAKE_CURRENT_BINARY_DIR}/../external_libraries/bet/Linux/libbetokan.a -lz )
+target_link_libraries(CreateMask PRIVATE ${ITK_LIBRARIES}  ${Boost_LIBRARIES} ${BETOKAN_LIB} -lz )
 
 
 add_executable(EstimateTensor   ../src/tools/EstimateTensor/estimate_tensor_wlls_main.cxx ../src/tools/EstimateTensor/DTIModel.cxx ../src/tools/EstimateTensor/estimate_tensor_wlls_parser.cxx  ${SOURCES})
@@ -728,11 +924,11 @@ target_link_libraries(Affine2Rigid ${ITK_LIBRARIES} ${Boost_LIBRARIES})
 
 
 add_executable(ApplyTransformationToTensor   ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx ../src/tools/DRTAMAS/ApplyTransformationToTensorDRT.cxx    ${SOURCES} )
-target_link_libraries(ApplyTransformationToTensor   ${ITK_LIBRARIES} ${Boost_LIBRARIES}    -static-libgcc -static-libstdc++)
+target_link_libraries(ApplyTransformationToTensor   ${ITK_LIBRARIES} ${Boost_LIBRARIES}    ${STATIC_CXX_LIBS})
 set_target_properties(ApplyTransformationToTensor PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/DRTAMAS")
 
 add_executable(SelectMostRepresentativeSample   ../src/tools/DRTAMAS/DRTAMAS_utilities_cp.cxx  ../src/tools/DRTAMAS/select_most_representative_sample.cxx    ${SOURCES} )
-target_link_libraries(SelectMostRepresentativeSample   ${ITK_LIBRARIES} ${Boost_LIBRARIES}    -static-libgcc -static-libstdc++)
+target_link_libraries(SelectMostRepresentativeSample   ${ITK_LIBRARIES} ${Boost_LIBRARIES}    ${STATIC_CXX_LIBS})
 set_target_properties(SelectMostRepresentativeSample PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/DRTAMAS")
 
 add_executable(ApplyTransformationToScalar2 ../src/tools/ApplyTransformationToScalar2/ApplyTransformationToScalar2.cxx ${SOURCES})
@@ -781,17 +977,17 @@ set_target_properties(ResampleTensor PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAK
 #target_link_libraries(AffineTransformationDeterminant ${ITK_LIBRARIES} ${Boost_LIBRARIES} )
 
 #add_executable(BrukerBmatToTORTOISEBMTXT   ../src/tools/BrukerBmatToTORTOISEBMTXT/BrukerBmatToTORTOISEBMTXT.cxx ${SOURCES})
-#target_link_libraries(BrukerBmatToTORTOISEBMTXT ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
+#target_link_libraries(BrukerBmatToTORTOISEBMTXT ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${STATIC_CXX_LIBS} )
 
 #add_executable(JoanahUpDownB0Transformations  ../src/tools/JoanahUpDownB0Transformations/JoanahUpDownB0Transformations.cxx ../src/tools/JoanahUpDownB0Transformations/JoanahUpDownB0Transformations_parser.cxx ${SOURCES})
-#target_link_libraries(JoanahUpDownB0Transformations ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
+#target_link_libraries(JoanahUpDownB0Transformations ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${STATIC_CXX_LIBS} )
 
 #add_executable(RigidPhaseScaleRegister  ../src/tools/RigidPhaseScaleRegister/RigidPhaseScaleRegister.cxx ../src/main/rigid_register_images.cxx  ${SOURCES})
-#target_link_libraries(RigidPhaseScaleRegister ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
+#target_link_libraries(RigidPhaseScaleRegister ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${STATIC_CXX_LIBS} )
 
 
 #add_executable(JoanahRegisterAlongAxes  ../src/tools/JoanahUpDownB0Transformations/JoanahRegisterAlongAxes.cxx ../src/main/register_dwi_to_b0.cxx   ../src/tools/ResampleDWIs/resample_dwis.cxx ${SOURCES})
-#target_link_libraries(JoanahRegisterAlongAxes ${ITK_LIBRARIES} ${Boost_LIBRARIES} -static-libgcc -static-libstdc++ )
+#target_link_libraries(JoanahRegisterAlongAxes ${ITK_LIBRARIES} ${Boost_LIBRARIES} ${STATIC_CXX_LIBS} )
 
 
 IF(USE_VTK)
@@ -807,7 +1003,8 @@ IF(USE_VTK)
       MESSAGE(FATAL_ERROR "VTK not found. Please set VTK_DIR.")
     ENDIF(VTK_FOUND)
 
-    set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
+    string(REPLACE ";" " " _static_flags "${STATIC_CXX_LIBS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${_static_flags}")
 
     add_executable(ComputeGlyphMaps ../src/tools/ComputeGlyphMaps/compute_glyph_maps.cxx  ../src/main/defines.cxx ../src/tools/ComputeGlyphMaps/vtkTensorGlyphOkan.cxx)
     target_link_libraries(ComputeGlyphMaps ${ITK_LIBRARIES} ${VTK_LIBRARIES} -lboost_system  )

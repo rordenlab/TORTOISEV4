@@ -85,6 +85,11 @@ void RequireStorageBuffers(uint32_t n, const char *who);
 
 uint64_t ErrorCount();
 
+// Whether this backend is emulating CUDA's quantised texture filter weights
+// (CLAUDE.md 5.2). Each backend owns its own switch; the shared replay harness must
+// ask rather than guess at an environment variable it does not own.
+bool TexFilterEmulation();
+
 } // namespace wgpuctx
 
 #endif

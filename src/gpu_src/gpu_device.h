@@ -4,7 +4,12 @@
 #include <string>
 #include <vector>
 
-#ifdef USEWEBGPU
+#ifdef USEMETAL
+    #include "../metal_src/metal_context.h"
+    // As with WebGPU below: one device, selected at startup, so this is a no-op.
+    inline std::vector<int> GPUDeviceIds() { mtlctx::Init(); return std::vector<int>(1, 0); }
+    inline void GPUSetDevice(int) {}
+#elif defined(USEWEBGPU)
     #include "../webgpu_src/webgpu_context.h"
     // The WebGPU backend binds exactly one adapter, chosen and verified at
     // startup (CLAUDE.md 3), so there is one device and selecting it is a no-op.

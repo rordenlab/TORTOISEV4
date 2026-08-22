@@ -1,4 +1,10 @@
-// webgpu_replay - replay captured CUDA golden vectors against the WebGPU port.
+// Replay captured CUDA golden vectors against a GPU backend port.
+//
+// ONE source, two executables: `webgpu_replay` and `metal_replay`. The backend is
+// selected by src/gpu_src/gpu_backend.h at compile time, so the record loader, the
+// comparator, the tolerance selection and the driver below are written once. Only
+// the binding differs - which is the whole reason the two backends can be graded
+// against the same records and the same tolerances.
 //
 //   webgpu_replay --all  <capture_dir> [--tol 1e-6]
 //   webgpu_replay <record_dir>...
@@ -32,17 +38,7 @@
 // measurement showed it is worse than exact trilinear.
 
 #include "gpu_record.h"
-#include "../../webgpu_src/gpu_image.h"
-#include "../../webgpu_src/webgpu_context.h"
-#include "../../webgpu_src/resample_image.h"
-#include "../../webgpu_src/warp_image.h"
-#include "../../webgpu_src/quadratic_transform_image.h"
-#include "../../webgpu_src/gaussian_smooth_image.h"
-#include "../../webgpu_src/image_utilities.h"
-#include "../../webgpu_src/compose_fields.h"
-#include "../../webgpu_src/invert_field.h"
-#include "../../webgpu_src/compute_entropy.h"
-#include "../../webgpu_src/compute_metric.h"
+#include "gpu_backend.h"   // selects the backend; see src/gpu_src/
 
 #include <dirent.h>
 #include <functional>
@@ -68,14 +64,14 @@ static CUDAIMAGE::Pointer ToDevice(const Tensor &t)
     img->components_per_voxel = t.ncomp;
     img->Allocate();
     if(!t.data.empty())
-        wgpuctx::Upload(img->getFloatdata().buf, t.data.data(), t.data.size() * sizeof(float));
+        gpuctx::Upload(img->getFloatdata().buf, t.data.data(), t.data.size() * sizeof(float));
     return img;
 }
 
 static std::vector<float> FromDevice(CUDAIMAGE::Pointer img)
 {
     std::vector<float> out(img->NumFloats());
-    wgpuctx::Download(img->getFloatdata().buf, out.data(), out.size() * sizeof(float));
+    gpuctx::Download(img->getFloatdata().buf, out.data(), out.size() * sizeof(float));
     return out;
 }
 
@@ -481,7 +477,7 @@ int main(int argc, char *argv[])
         std::map<std::string, int> per_op;
         for(size_t i = 0; i < dirs.size(); i++)
             try { per_op[LoadRecord(dirs[i]).op]++; } catch(std::exception &) {}
-        std::cout << "op coverage (WebGPU):\n";
+        std::cout << "op coverage (" GPU_BACKEND_NAME "):\n";
         for(std::map<std::string, int>::iterator it = per_op.begin(); it != per_op.end(); ++it)
             std::cout << "  " << (registry.count(it->first) ? "[ported  ] " : "[unported] ")
                       << it->first << "  x" << it->second << "\n";
@@ -490,16 +486,16 @@ int main(int argc, char *argv[])
 
     if(mode == "--bench")
     {
-        wgpuctx::Init();
-        std::cout << "WebGPU bench on " << wgpuctx::Info().Describe() << "\n\n";
+        gpuctx::Init();
+        std::cout << GPU_BACKEND_NAME " bench on " << gpuctx::Info().Describe() << "\n\n";
         return RunBench(dirs, registry, reps);
     }
 
-    wgpuctx::Init();
-    std::cout << "WebGPU replay on " << wgpuctx::Info().Describe() << "\n"
+    gpuctx::Init();
+    std::cout << GPU_BACKEND_NAME " replay on " << gpuctx::Info().Describe() << "\n"
               << "tolerances: elementwise " << tol_elementwise
               << ", texture-sampling " << tol_texture
-              << (std::getenv("TORTOISE_WEBGPU_CUDA_TEXFILTER") ? " (cuda-filter emulation ON)" : "")
+              << (gpuctx::TexFilterEmulation() ? " (cuda-filter emulation ON)" : "")
               << "\n\n";
 
     int pass = 0, fail = 0, bad = 0, unported = 0;
@@ -522,7 +518,7 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        const uint64_t errors_before = wgpuctx::ErrorCount();
+        const uint64_t errors_before = gpuctx::ErrorCount();
         Outcome out;
         // Against an exact analytic reference every op gets the tight gate; only
         // comparisons against CUDA absorb CUDA's own sampler loss.
@@ -554,11 +550,11 @@ int main(int argc, char *argv[])
         { std::cout << "BAD      " << rec.op << ": " << e.what() << "\n"; bad++; continue; }
 
         std::string label = dirs[i].substr(dirs[i].find_last_of('/') + 1);
-        if(wgpuctx::ErrorCount() != errors_before)
+        if(gpuctx::ErrorCount() != errors_before)
         {
             std::cout << "BAD      " << label << ": "
-                      << (wgpuctx::ErrorCount() - errors_before)
-                      << " WebGPU validation error(s) - dispatch was rejected, results are"
+                      << (gpuctx::ErrorCount() - errors_before)
+                      << " " GPU_BACKEND_NAME " validation error(s) - dispatch was rejected, results are"
                          " meaningless\n";
             bad++;
             continue;
