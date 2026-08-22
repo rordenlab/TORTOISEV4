@@ -1082,3 +1082,55 @@ levers, cheapest first - shrink live state (recompute rather than hold), try `bl
 one run** (achieved occupancy, registers/thread, stall reasons) but is blocked by
 `ERR_NVGPUCTRPERM` - it needs `NVreg_RestrictProfilingToAdminUsers=0`, i.e. root, and this machine
 has no sudo. Without counters, each hypothesis costs a build plus an nsys run to test.
+
+
+## 21. Full validation on the committed code (branch `optimize`, e879b9c)
+
+Run as a single clean sequence 2026-08-22: build all three configs once, regenerate the reference
+evidence with those exact binaries, then gate. No source edits in between - the discipline that
+was violated twice earlier in this work.
+
+Binaries: CUDA `3e1dff9b`, WebGPU `d22fcefc`.
+
+| gate | result |
+|---|---|
+| build cpu / cuda / webgpu | **PASS** clean |
+| CUDA self-replay `fast` (bitwise) | **PASS 132/132** |
+| CUDA self-replay `slow` (bitwise) | **PASS 106/106** |
+| WebGPU replay fast / medium / slow / synthetic | **PASS 132 / 118 / 106 / 25** |
+| webgpu_probe (adapter + allocation) | **PASS** |
+| negative tests | **PASS** |
+| end-to-end `fast` smoke | **PASS** |
+| record manifest | FAIL - stale index (pre-existing) |
+| DIFFPREP pa registration | FAIL - stale baseline |
+| isolated DRBUDDI Step2 | FAIL - stale reference class |
+
+**Zero correctness failures. All three FAILs are baseline/bookkeeping staleness**, and all three
+require *replacing a stored baseline*, which `plan_optimize.md` §3 forbids as part of performance
+work ("Do not recapture goldens, loosen a tolerance, replace a baseline... Those actions are a
+separate approved change"). They are therefore left failing, deliberately:
+
+- `record manifest` - `benchmark/MANIFEST.json` (08-21 02:49) predates a recapture of the record
+  trees (07:14-08:33 the same morning). **Predates this work entirely.**
+- `DIFFPREP pa registration` - `diffprep_pa_baseline.json` (08-20 00:48) was recorded against CUDA
+  binary `a20b5dcd`. The summary line reads "outside NOFMA-relative thresholds", which is
+  misleading; the detail is "baseline recorded against a different CUDA binary - re-baseline".
+- `isolated DRBUDDI Step2` - `DRB_C1` was produced by `a20b5dcd`. Re-baselining also needs
+  `build_cuda_nofma` rebuilt by hand; `revalidate.sh` does not build it.
+
+**Performance on the validated binaries:**
+
+| | baseline | validated | change |
+|---|---:|---:|---:|
+| `fast` CUDA wall (n=2) | 11:48 | **6:56 - 7:03** | **-41 %** |
+| `fast` CUDA TOTAL | 708 s | 415 / 423 s | |
+| `DIFFPREP.Register` | 316 s | 127 / 128 s | -60 % |
+| DRBUDDI s/iter | 0.223 | 0.115 / 0.124 | -46 % |
+| `fast` WebGPU wall (n=1) | 12:51 | **10:37** | -17 % |
+
+The `fast` CUDA result improved again over the §16 figures because the `NegateImage` fusion (§18)
+landed after those were taken: post-fusion 415-423 s does not overlap the geometry-only 447-485 s.
+
+**WebGPU's remaining gap is its own registration path**: `t_gpu` 1.256 s/volume against CUDA's
+0.51 s. That is why the queue gives it 78 GPU volumes rather than 108, and why it gains 17 %
+where CUDA gains 41 %. It is the port's next target and is independent of this work.
