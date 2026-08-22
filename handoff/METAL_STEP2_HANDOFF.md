@@ -1,184 +1,134 @@
 # Isolated DRBUDDI Step2 — handoff for the macOS/Metal port
 
-Generated 2026-08-22 on the Linux CUDA host, branch `optimize` @ `ce37d17`.
-Binaries: CUDA `3e1dff9b`, WebGPU `d22fcefc`.
+Regenerated 2026-08-22 on the Linux CUDA host, branch `optimize`.
+CUDA `3e1dff9b`, WebGPU `d22fcefc`, deterministic CUDA `083e682f`.
+
+**This document replaces an earlier version that was substantially wrong.** That version
+claimed the frozen fixture was contaminated and that the isolated gate was unusable.
+Both claims came from reading stale `DRB_*` directories (an older naming convention the
+script no longer writes) instead of the directories the runs actually produced. Corrected
+below; the retractions are listed at the end so nothing is silently changed.
 
 ---
 
-## READ THIS FIRST — the reference is not exact any more
+## The isolated Step2 gate works. Use it.
 
-`CLAUDE.md` §7 and `drbuddi_isolated.sh`'s own header both claim that two CUDA runs
-from the frozen fixture are **bit-identical**, so any Step2 difference is
-attributable to the backend. **That is no longer true**, and it was discovered while
-building this payload.
+**Measured: two CUDA runs of `drbuddi_isolated.sh run <tag> CUDA` from the same fixture
+are BIT-IDENTICAL** — all five artefacts, `r = 1.00000000`, 0.00 % of elements differing.
+No special build required. `--DRBUDDI_step 2` skips Step0/Step1, and everything Step2
+depends on is then fixed, so any difference is attributable to the GPU backend.
 
-Measured, two CUDA runs, identical fixture, identical binary:
+### The clean cross-backend delta (Linux, same machine, same fixture)
 
-| comparison | `deformation_FINV` rel_rms | Pearson r | DRBUDDI iterations |
-|---|---:|---:|---:|
-| **CUDA vs CUDA** | **0.129** | 0.99170 | **901 vs 731** |
-| CUDA vs WebGPU | 0.107 | 0.99426 | — |
+This is the number your Metal delta should be compared against:
 
-**CUDA differs from itself by more than WebGPU differs from CUDA.**
+| artefact | max\|d\| | max\|d\|/p99 | rel_rms | Pearson r | differ% |
+|---|---:|---:|---:|---:|---:|
+| `deformation_FINV.nii.gz` | 4.947 | 0.858 | **0.0483** | **0.99887** | 96.7 |
+| `deformation_MINV.nii.gz` | 4.317 | 0.709 | 0.0488 | 0.99884 | 96.7 |
+| `blip_up_b0_corrected.nii` | 8864 | 0.702 | 0.0168 | 0.99982 | 86.4 |
+| `blip_down_b0_corrected.nii` | 5312 | 0.474 | 0.0169 | 0.99982 | 85.9 |
+| `b0_corrected_final.nii` | 3698 | 0.329 | 0.00775 | 0.99996 | 85.4 |
 
-### Why
-
-`drbuddi_isolated.sh run` copies the fixture into a working directory and then
-launches the *full* pipeline with `--DRBUDDI_step 2` (TORTOISEProcess has no flag to
-skip DIFFPREP). DIFFPREP therefore still executes and **overwrites files inside the
-copied `ap_temp_proc/`** — including `blip_up_b0.nii`, which is a Step2 *input*.
-Verified: that file differs between the two runs.
-
-This was previously harmless because DIFFPREP's GPU/CPU volume routing was static
-index arithmetic and therefore deterministic. The `optimize` branch replaced it with a
-**dynamic work queue** whose split is measured at runtime, so routing is now
-timing-dependent, DIFFPREP output varies run to run, and that variation propagates into
-Step2's inputs.
-
-So: the fixture is frozen on disk, but not in effect.
-
-### It is worse than that: a slower backend gets MORE nondeterminism
-
-The dynamic queue sizes the CPU/GPU split from **measured** per-volume throughput. A
-slower GPU therefore takes fewer volumes and pushes more onto the ITK CPU path - which
-is the non-reproducible one. Measured on this host, same machine, same data:
-
-| backend | `t_gpu` per volume | split (GPU/CPU) | volumes on the NONDETERMINISTIC path |
-|---|---:|---|---:|
-| CUDA | 0.51 s | 108 / 30 | 30 |
-| WebGPU | 1.26 s | 78 / 60 | **60** |
-
-**Metal will very likely also be slower than CUDA**, so expect it to land nearer the
-WebGPU split - i.e. roughly twice as many volumes through the non-reproducible path as
-the CUDA reference it is being compared with.
-
-Two consequences, and the second is the nasty one:
-
-1. Your Metal runs will vary run-to-run **more** than the CUDA reference does.
-2. Because the two backends run **different splits**, a Step2 difference conflates the
-   actual GPU-kernel difference with *differing amounts of ITK contamination*. It is
-   not a clean backend delta in either direction.
-
-This also means the comparison gets *less* trustworthy the slower your backend is -
-exactly backwards from what you want while bringing a new backend up.
-
-### Removing it entirely (recommended if you use Step2 at all)
-
-`OMP_NUM_THREADS=1` makes the whole thing deterministic **with no rebuild**: with
-`Nt = 1` the queue creates a single worker, that worker is the GPU thread, so every
-volume takes the GPU path and no ITK CPU registration happens at all. Routing is then
-fixed, DIFFPREP output is reproducible, and Step2's inputs are stable.
-
-    OMP_NUM_THREADS=1 benchmark/scripts/drbuddi_isolated.sh run M1 Metal
-
-Cost: it single-threads the rest of the pipeline, so the run is substantially slower.
-For a correctness comparison that is the right trade. `-DTORTOISE_DETERMINISTIC_GPU=1`
-achieves the same thing at build time while keeping other stages parallel.
-
-**Both references shipped here were produced WITHOUT that flag**, so they carry the
-variance described above. If you want an exact reference, ask for a regenerated pair -
-it is ~25 minutes of GPU time on the Linux host.
-
-### What to do about it
-
-**Judge Metal against the CUDA-vs-CUDA floor, not against an absolute number.** This is
-the same logic `CLAUDE.md` §5.4 applies to the end-to-end gate, which was demoted to a
-smoke test for exactly this reason.
-
-- Metal-vs-CUDA **at or below ~0.13 rel_rms / r ≳ 0.992** on the deformation fields:
-  consistent with a correct backend.
-- **Orders of magnitude larger**: a real bug.
-- **Far smaller than the floor**: also suspect — it would suggest the comparison is not
-  exercising what you think it is.
-
-**The clean fix**, if you want an exact reference: rebuild with
-`-DTORTOISE_DETERMINISTIC_GPU=1`. It routes every volume to the GPU path, making
-DIFFPREP deterministic again. That switch was deliberately preserved through the
-dynamic-queue rewrite for this purpose. Ask and it can be regenerated that way.
+Since CUDA-vs-CUDA is exactly zero, that whole table is backend difference — a correct
+second backend landing in this range is a pass. Note the deformation fields differ by
+~5 % RMS despite bit-exact kernels: Step2 is a fixed-point iteration and amplifies
+last-ulp differences. High `differ%` with low `rel_rms` is the expected signature.
 
 ---
 
-## The payload (2.8 GB, transferred out-of-band — see below)
+## What IS nondeterministic: DRBUDDI Step1, end-to-end only
+
+Two **end-to-end** runs of a `-DDETERMINISTIC_GPU=1` build, both routing all 138 volumes
+to the GPU (`gpu_vols 138 cpu_vols 0`), still differ — 35 % of voxels, DRBUDDI iteration
+counts 901 vs 731. Comparing every intermediate localises it exactly:
+
+| | file |
+|---|---|
+| IDENTICAL | `ap_proc.nii` (import/denoise/Gibbs), `ap_proc_moteddy_transformations.txt` (DIFFPREP registration), `blip_up/down_b0.nii`, `*_FA.nii`, `*_quad.nii` (DRBUDDI **Step0**), `b0_str_registration_target.nii` (**Step1's input**) |
+| DIFFERS | **`b0_to_str_rigidtrans.hdf5`**, **`bdown_to_bup_rigidtrans.hdf5`** (**Step1's output**), then everything downstream |
+
+**Step1's input is bit-identical and its output is not.** DRBUDDI Step1's ITK rigid
+registration is multithreaded and non-reproducible. `DETERMINISTIC_GPU` does not touch
+it — that flag only pins DIFFPREP's volume routing (which it does correctly: the
+transformations file is bit-identical).
+
+This explains the macOS observation of `r = 0.999424` between two runs with **identical**
+76/62 splits: it was never Metal, never routing, and never host arithmetic — the
+CPU-only stages match across platforms at `r = 1.000000000000`.
+
+**Consequence: end-to-end comparison cannot be made exact by any flag.** Use the
+isolated Step2 gate, which sidesteps Step1 entirely.
+
+---
+
+## How to run it
+
+```bash
+# add a Metal case next to the existing ones in drbuddi_isolated.sh:
+#     Metal)  EXE=$ROOT/bin/TORTOISEProcess_metal ;;
+
+cp -a DRB_FIXTURE  <repo>/benchmark/fast/DRB_FIXTURE
+chmod -R a-w       <repo>/benchmark/fast/DRB_FIXTURE
+
+benchmark/scripts/drbuddi_isolated.sh run M1 Metal
+python3 delta.py benchmark/fast/M1/ap_temp_proc DET_REFERENCE Metal CUDA
+```
+
+**Output path is `benchmark/fast/<TAG>`** — no `DRB_` prefix. The script writes
+`benchmark/$DS/$TAG` and `compare` reads the same place; it is self-consistent. Empty
+`DRB_*` skeletons in an older tree are from a superseded convention and are exactly what
+misled the earlier version of this document.
+
+Run it **twice** and `cmp` the two before trusting any cross-backend number. If Metal
+does not reproduce itself, that is the finding, and no comparison against CUDA means
+anything until it does.
+
+---
+
+## Payload
 
 | path | size | what |
 |---|---:|---|
-| `DRB_FIXTURE/` | 2.1 GB | frozen Step2 input. Copy to `benchmark/fast/DRB_FIXTURE` |
-| `DRB_C1_ref/` | 383 MB | CUDA Step2 output — the 5 compared artefacts |
-| `DRB_W1_ref/` | 384 MB | WebGPU Step2 output — same 5 |
-| `delta.py`, `compare_outputs.py` | small | quantify a delta (see below) |
+| `DRB_FIXTURE/` | 2.1 GB | frozen Step2 input |
+| `DET_REFERENCE/` | 383 MB | CUDA Step2 output, verified reproducible |
+| `WEBGPU_REFERENCE/` | 384 MB | WebGPU Step2 output — the worked example above |
+| `delta.py`, `compare_outputs.py`, `SHA256SUMS` | small | tooling + transfer verification |
 
-The 5 artefacts: `deformation_FINV.nii.gz`, `deformation_MINV.nii.gz`,
-`blip_up_b0_corrected.nii`, `blip_down_b0_corrected.nii`, `b0_corrected_final.nii`.
+`ap_TORTOISE_final.nii` (608 MB) is excluded: it is the pipeline's end-to-end output,
+snapshotted into the fixture incidentally, and Step2 never reads it. Verified by running
+Step2 from the trimmed fixture.
 
-`ap_TORTOISE_final.nii` (608 MB) was **excluded** — it is the pipeline's end-to-end
-output, snapshotted into the fixture incidentally; Step2 never reads it. Verified by
-running Step2 from the trimmed fixture before shipping.
-
-### Use
-
-```bash
-cp -a DRB_FIXTURE  <repo>/benchmark/fast/DRB_FIXTURE
-chmod -R a-w       <repo>/benchmark/fast/DRB_FIXTURE   # the script expects read-only
-
-benchmark/scripts/drbuddi_isolated.sh run M1 Metal     # add a Metal case to the script
-python3 delta.py benchmark/fast/DRB_M1/ap_temp_proc DRB_C1_ref Metal CUDA
-```
-
-Drive it through `drbuddi_isolated.sh`, not by hand. `run` deliberately deletes the
-Step2 outputs from its working copy first, because the fixture contains CUDA-derived
-copies of exactly the files being compared — a run that died early would otherwise
-leave them in place and be scored as a pass.
+Not transferable via git: 10 files exceed GitHub's 100 MB per-file limit and 2.9 GB would
+permanently inflate a 13 MB repository. Use `rsync`.
 
 ---
 
-## This is the SECONDARY gate. The primary one needs none of this.
+## The primary gate needs none of this
 
-`CLAUDE.md` §3.1: the per-kernel golden vectors are self-contained. `bin/webgpu_replay`
-links no CUDA, and every record carries its own `out` tensors, which *are* the CUDA
-reference. So on macOS:
+Per CLAUDE.md §3.1 the per-kernel golden vectors are self-contained — `webgpu_replay`
+links no CUDA and every record carries CUDA's recorded output. Build with
+`benchmark/scripts/make_reference_bundle.sh`. **If you are stalled, start there**: a
+failure names the specific kernel, where Step2 only tells you the stage moved.
 
-```bash
-bin/webgpu_replay --all <bundle>/records/fast        # 132
-bin/webgpu_replay --all <bundle>/records/medium      # 118
-bin/webgpu_replay --all <bundle>/records/slow        # 106
-bin/webgpu_replay --all <bundle>/records/synthetic   #  25
-```
-
-grades Metal against exactly the reference and tolerances the Vulkan backend passes.
-Build that bundle with `benchmark/scripts/make_reference_bundle.sh <out> [--tar]`.
-
-**Prefer it, and if you are stalled, start here.** It is unaffected by everything
-above - no DIFFPREP, no ITK CPU path, no scheduling, no fixture. Each record is a single
-kernel invocation with its inputs and CUDA's recorded output, so a failure names the
-kernel. The Step2 comparison can only tell you *that* the stage diverges, and right now
-it cannot even do that cleanly.
-
-Suggested order for bringing Metal up:
-
-1. `bin/webgpu_probe` - confirm adapter selection before anything else.
-2. `webgpu_replay --all records/synthetic` (25) - analytic references, exact answers,
-   smallest volumes. Failures here are unambiguous.
-3. `webgpu_replay --all records/fast` (132) - all 20 ported ops.
-4. `records/medium` (118) and `records/slow` (106) - larger matrices, catches
-   dimension- and pitch-dependent bugs.
-5. Only then consider Step2, and only with `OMP_NUM_THREADS=1`.
-
-Also note (§3.1): the Metal defaults are untested. Start with
-`TORTOISE_WEBGPU_BACKEND=metal`, `TORTOISE_WEBGPU_ADAPTER_TYPE=integrated`,
-`TORTOISE_WEBGPU_VENDOR_ID=0x106B`, and confirm with `bin/webgpu_probe` before anything
-else — the default policy demands an NVIDIA *discrete* *Vulkan* adapter and will refuse
-to run.
+Suggested order: `webgpu_probe` (confirm adapter — the Metal defaults in §3.1 are
+untested) → `synthetic` (25, analytic references) → `fast` (132, all 20 ops) →
+`medium` (118) → `slow` (106) → Step2 last.
 
 ---
 
-## Transport
+## Retractions from the previous version
 
-Not via git: 10 of these files exceed GitHub's 100 MB per-file hard limit (largest
-567 MB), and a 2.8 GB push would permanently inflate a 13 MB repository for every
-clone — deleting the branch does not reclaim it. Options, best first:
-
-1. **Direct copy** — `rsync -av <linux>:/home/chris/metal_drbuddi_bundle/ ./` . Minutes
-   on a LAN, nothing persisted anywhere.
-2. **GitHub Release assets** — up to 2 GB per asset, excluded from clones, deletable.
-   Would need splitting into 2–3 assets.
-3. **Git LFS** — works, but 2.8 GB exceeds the free 1 GB storage/bandwidth tier.
+1. "The fixture is frozen on disk but not in effect" — **false**. Two fresh CUDA runs are
+   bit-identical. The `blip_up_b0.nii` difference was against a stale directory.
+2. "Neither mechanism alone is sufficient" — **false**. `--DRBUDDI_step 2` alone suffices;
+   `DETERMINISTIC_GPU` is not needed for the isolated gate.
+3. "CUDA differs from itself by more than WebGPU differs from CUDA" — **false**, same
+   cause. CUDA-vs-CUDA is zero.
+4. Cross-backend `rel_rms 0.107 / r 0.99426` — **wrong figures**, computed from two stale
+   runs built by different binaries. Correct: 0.0483 / 0.99887.
+5. "A slower backend gets more nondeterminism" — the *mechanism* is real (the dynamic
+   queue sizes the split from measured throughput, and CUDA 108/30 vs WebGPU 78/60 is
+   measured), but it does not affect the isolated gate, which bypasses DIFFPREP routing.
+   It applies to end-to-end comparison only.
+6. `benchmark/fast/DRB_M1/...` in the run instructions — a path the script never produces.
