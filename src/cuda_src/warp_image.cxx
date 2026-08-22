@@ -14,7 +14,7 @@ CUDAIMAGE::Pointer WarpImage(CUDAIMAGE::Pointer main_image, CUDAIMAGE::Pointer f
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(sizeof(float)*main_image->sz.x,main_image->sz.y,main_image->sz.z);
     cudaMalloc3D(&d_output, extent);
-    cudaMemset3D(d_output,0,extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
 
     WarpImage_cuda(main_image->GetTexture(),

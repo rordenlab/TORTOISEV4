@@ -18,7 +18,7 @@
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(main_field->components_per_voxel*sizeof(float)*virtual_img->sz.x,virtual_img->sz.y,virtual_img->sz.z);
     cudaMalloc3D(&d_output, extent);
-    cudaMemset3D(d_output,0,extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
 
     ResampleImage_cuda(main_field->getFloatdata(),

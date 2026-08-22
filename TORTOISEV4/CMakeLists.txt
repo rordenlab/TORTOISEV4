@@ -87,13 +87,33 @@ set( CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../bin/lib/ )
 set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../bin/lib/ )
 
 
+# Vectorisation floor: x86-64-v3 = Haswell (2013) / Excavator, giving AVX2 + FMA.
+# Without it the build targets baseline x86-64, i.e. SSE2 only, so -O3's autovectoriser
+# is capped at 128-bit vectors and NO FMA instruction is emitted anywhere on the host.
+# Deliberately NOT -march=native: that would bake in this Zen 4's AVX-512 and SIGILL on
+# any older machine, and TORTOISE ships binaries. -DTORTOISE_ARCH=none for a generic build.
+#
+# NOTE: this changes host floating-point results (FMA contraction, wider reduction
+# vectors). It does not reach the CUDA kernels - CUDA_FLAGS are separate and there is no
+# -Xcompiler forwarding - but src/cuda_src/*.cxx host wrappers ARE compiled with these
+# flags, so `gpu_replay --all` must be re-checked after any change here.
+IF(NOT DEFINED TORTOISE_ARCH)
+    SET(TORTOISE_ARCH "x86-64-v3")
+ENDIF()
+IF(TORTOISE_ARCH STREQUAL "none")
+    SET(TORTOISE_ARCH_FLAG "")
+ELSE()
+    SET(TORTOISE_ARCH_FLAG "-march=${TORTOISE_ARCH}")
+ENDIF()
+message(STATUS "TORTOISE host arch flag: ${TORTOISE_ARCH_FLAG}")
+
 IF(USEOPENMP)
-    SET(CMAKE_CXX_FLAGS "-fopenmp -std=c++14 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
-    SET(CMAKE_C_FLAGS "-fopenmp -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    SET(CMAKE_CXX_FLAGS "${TORTOISE_ARCH_FLAG} -fopenmp -std=c++14 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    SET(CMAKE_C_FLAGS "${TORTOISE_ARCH_FLAG} -fopenmp -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
     add_definitions(-DUSE_OPENMP)
 ELSE(USEOPENMP)
-    SET(CMAKE_CXX_FLAGS "-fPIC -std=c++14 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
-    SET(CMAKE_C_FLAGS "-fPIC -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    SET(CMAKE_CXX_FLAGS "${TORTOISE_ARCH_FLAG} -fPIC -std=c++14 -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
+    SET(CMAKE_C_FLAGS "${TORTOISE_ARCH_FLAG} -fPIC -Wno-deprecated-declarations -Wno-unused-result -Wno-narrowing")
 ENDIF(USEOPENMP)
 
 

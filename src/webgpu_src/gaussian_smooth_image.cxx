@@ -70,10 +70,17 @@ CUDAIMAGE::Pointer GaussianSmoothImageWithTaps(CUDAIMAGE::Pointer main_image,
     output->components_per_voxel = main_image->components_per_voxel;
     output->Allocate();
 
-    const uint32_t wg = 4;
-    const uint32_t gx = (main_image->sz.x + wg - 1) / wg;
-    const uint32_t gy = (main_image->sz.y + wg - 1) / wg;
-    const uint32_t gz = (main_image->sz.z + wg - 1) / wg;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
+    const uint32_t gx = (main_image->sz.x + wgx - 1) / wgx;
+    const uint32_t gy = (main_image->sz.y + wgy - 1) / wgy;
+    const uint32_t gz = (main_image->sz.z + wgz - 1) / wgz;
 
     // Three separable passes: x -> buf1, y -> buf2, z -> output.
     wgpu::Buffer params = wgpuctx::CreateUniform(&p, sizeof(p));
@@ -86,7 +93,7 @@ CUDAIMAGE::Pointer GaussianSmoothImageWithTaps(CUDAIMAGE::Pointer main_image,
     {
         wgpu::ComputePipeline pipe =
             wgpuctx::Pipeline("gaussian_smooth_image", kgaussian_smooth_imageWGSL, "main",
-                              wg, wg, wg, {{"AXIS", (double)passes[s].axis}});
+                              wgx, wgy, wgz, {{"AXIS", (double)passes[s].axis}});
         wgpuctx::Dispatch(pipe, {passes[s].in, passes[s].out, params}, gx, gy, gz);
     }
 
@@ -101,7 +108,7 @@ CUDAIMAGE::Pointer GaussianSmoothImageWithTaps(CUDAIMAGE::Pointer main_image,
         wgpu::Buffer bparams = wgpuctx::CreateUniform(&p, sizeof(p));
         wgpu::ComputePipeline pipe =
             wgpuctx::Pipeline("gaussian_smooth_image", kgaussian_smooth_imageWGSL,
-                              "adjust_boundary", wg, wg, wg, {{"AXIS", 0.0}});
+                              "adjust_boundary", wgx, wgy, wgz, {{"AXIS", 0.0}});
         wgpuctx::Dispatch(pipe,
                           {main_image->getFloatdata().buf, output->getFloatdata().buf, bparams},
                           gx, gy, gz);

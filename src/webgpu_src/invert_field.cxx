@@ -65,10 +65,17 @@ CUDAIMAGE::Pointer InvertField(CUDAIMAGE::Pointer field, CUDAIMAGE::Pointer init
     p.sz[3] = field->components_per_voxel;
     p.spc[0] = field->spc.x; p.spc[1] = field->spc.y; p.spc[2] = field->spc.z;
 
-    const uint32_t wg = 4;
-    const uint32_t gx = (field->sz.x + wg - 1) / wg;
-    const uint32_t gy = (field->sz.y + wg - 1) / wg;
-    const uint32_t gz = (field->sz.z + wg - 1) / wg;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
+    const uint32_t gx = (field->sz.x + wgx - 1) / wgx;
+    const uint32_t gy = (field->sz.y + wgy - 1) / wgy;
+    const uint32_t gz = (field->sz.z + wgz - 1) / wgz;
 
     while(iteration++ < Niter && max_error > max_tol && mean_error > mean_tol)
     {
@@ -76,7 +83,7 @@ CUDAIMAGE::Pointer InvertField(CUDAIMAGE::Pointer field, CUDAIMAGE::Pointer init
 
         wgpu::ComputePipeline p1 =
             wgpuctx::Pipeline("invert_field", kinvert_fieldWGSL, "local_norm_and_negate",
-                              wg, wg, wg);
+                              wgx, wgy, wgz);
         wgpu::Buffer params = wgpuctx::CreateUniform(&p, sizeof(p));
         // this entry point does not touch `outp`, so binding 2 must be omitted
         wgpuctx::DispatchAt(p1, {{0u, composed->getFloatdata().buf},
@@ -107,7 +114,7 @@ CUDAIMAGE::Pointer InvertField(CUDAIMAGE::Pointer field, CUDAIMAGE::Pointer init
         wgpu::Buffer params2 = wgpuctx::CreateUniform(&p, sizeof(p));
         wgpu::ComputePipeline p2 =
             wgpuctx::Pipeline("invert_field", kinvert_fieldWGSL, "update_invert_field",
-                              wg, wg, wg);
+                              wgx, wgy, wgz);
         wgpuctx::Dispatch(p2, {composed->getFloatdata().buf, scale->getFloatdata().buf,
                                output->getFloatdata().buf, params2}, gx, gy, gz);
     }

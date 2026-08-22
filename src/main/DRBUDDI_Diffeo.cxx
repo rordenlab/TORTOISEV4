@@ -7,6 +7,7 @@
 #include "DRBUDDI_Diffeo.h"
 #include <iostream>
 #include "run_drbuddi_stage.h"
+#include "tortoise_profile.h"
 
 
 #ifdef USEGPU
@@ -1040,6 +1041,7 @@ void DRBUDDI_Diffeo::Process()
 
     for(int st=0;st< stages.size();st++)
     {
+        TORTOISE_PROFILE("DRBUDDI.Stage" + std::to_string(st+1));
         (*stream)<<"Stage number: "<<st+1<< " / " << stages.size() << std::endl;
         (*stream)<<"Current learning rate: "<<stages[st].learning_rate<<std::endl;
         (*stream)<<"Number of iterations: "<<stages[st].niter<<std::endl;

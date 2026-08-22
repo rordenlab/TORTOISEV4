@@ -360,7 +360,7 @@ CUDAIMAGE::Pointer ComputeDetImgMain(CUDAIMAGE::Pointer img, CUDAIMAGE::Pointer 
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(sizeof(float)*img->sz.x,img->sz.y,img->sz.z);
     cudaMalloc3D(&d_output, extent);
-    cudaMemset3D(d_output,0,extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
     ComputeDetImg_cuda(img->getFloatdata(), field->getFloatdata(),
                        img->sz, img->spc,

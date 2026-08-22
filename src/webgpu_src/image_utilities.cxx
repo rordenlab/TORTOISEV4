@@ -41,15 +41,22 @@ CUDAIMAGE::Pointer MakeLike(CUDAIMAGE::Pointer src, int ncomp = -1)
 void Run(const char *entry, const UtilParams &p, CUDAIMAGE::Pointer shape,
          const std::vector<std::pair<uint32_t, wgpu::Buffer> > &bufs)
 {
-    const uint32_t wg = 4;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("image_utilities", kimage_utilitiesWGSL, entry, wg, wg, wg);
+        wgpuctx::Pipeline("image_utilities", kimage_utilitiesWGSL, entry, wgx, wgy, wgz);
     std::vector<std::pair<uint32_t, wgpu::Buffer> > all = bufs;
     all.push_back(std::make_pair(3u, wgpuctx::CreateUniform(&p, sizeof(p))));
     wgpuctx::DispatchAt(pipe, all,
-                        (shape->sz.x + wg - 1) / wg,
-                        (shape->sz.y + wg - 1) / wg,
-                        (shape->sz.z + wg - 1) / wg);
+                        (shape->sz.x + wgx - 1) / wgx,
+                        (shape->sz.y + wgy - 1) / wgy,
+                        (shape->sz.z + wgz - 1) / wgz);
 }
 } // namespace
 

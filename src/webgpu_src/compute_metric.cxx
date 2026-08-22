@@ -60,16 +60,23 @@ float ComputeMetric_CC(const CUDAIMAGE::Pointer up_img, const CUDAIMAGE::Pointer
     MetricParams p = MakeMetricParams(up_img);
     wgpu::Buffer par = wgpuctx::CreateUniform(&p, sizeof(p));
 
-    const uint32_t wg = 4;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("metric_cc", kmetric_ccWGSL, "main", wg, wg, wg);
+        wgpuctx::Pipeline("metric_cc", kmetric_ccWGSL, "main", wgx, wgy, wgz);
     wgpuctx::Dispatch(pipe,
                       {up_img->getFloatdata().buf, down_img->getFloatdata().buf,
                        updateFieldF->getFloatdata().buf, updateFieldM->getFloatdata().buf,
                        metric->getFloatdata().buf, par},
-                      (up_img->sz.x + wg - 1) / wg,
-                      (up_img->sz.y + wg - 1) / wg,
-                      (up_img->sz.z + wg - 1) / wg);
+                      (up_img->sz.x + wgx - 1) / wgx,
+                      (up_img->sz.y + wgy - 1) / wgy,
+                      (up_img->sz.z + wgz - 1) / wgz);
 
     const float sum = Reduce(metric->getFloatdata().buf, metric->NumVoxels(), ReduceOp::Sum);
     return sum / up_img->sz.x / up_img->sz.y / up_img->sz.z;
@@ -99,14 +106,21 @@ float ComputeMetric_CCSK(const CUDAIMAGE::Pointer up_img, const CUDAIMAGE::Point
     p.phase[3] = t;
     wgpu::Buffer par = wgpuctx::CreateUniform(&p, sizeof(p));
 
-    const uint32_t wg = 4;
-    const uint32_t gx = (up_img->sz.x + wg - 1) / wg;
-    const uint32_t gy = (up_img->sz.y + wg - 1) / wg;
-    const uint32_t gz = (up_img->sz.z + wg - 1) / wg;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
+    const uint32_t gx = (up_img->sz.x + wgx - 1) / wgx;
+    const uint32_t gy = (up_img->sz.y + wgy - 1) / wgy;
+    const uint32_t gz = (up_img->sz.z + wgz - 1) / wgz;
 
     // 1. build the K image
     wgpu::ComputePipeline kpipe =
-        wgpuctx::Pipeline("metric_ccsk", kmetric_ccskWGSL, "compute_k", wg, wg, wg);
+        wgpuctx::Pipeline("metric_ccsk", kmetric_ccskWGSL, "compute_k", wgx, wgy, wgz);
     wgpuctx::DispatchAt(kpipe, {{0u, up_img->getFloatdata().buf},
                                 {1u, down_img->getFloatdata().buf},
                                 {2u, K->getFloatdata().buf},
@@ -114,7 +128,7 @@ float ComputeMetric_CCSK(const CUDAIMAGE::Pointer up_img, const CUDAIMAGE::Point
 
     // 2. correlate it against the structural image
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("metric_ccsk", kmetric_ccskWGSL, "main", wg, wg, wg);
+        wgpuctx::Pipeline("metric_ccsk", kmetric_ccskWGSL, "main", wgx, wgy, wgz);
     wgpuctx::DispatchAt(pipe, {{0u, up_img->getFloatdata().buf},
                                {1u, down_img->getFloatdata().buf},
                                {2u, K->getFloatdata().buf},
@@ -204,17 +218,24 @@ float ComputeMetric_MSJacWithTaps(const CUDAIMAGE::Pointer up_img, const CUDAIMA
 
     wgpu::Buffer par = wgpuctx::CreateUniform(&p, sizeof(p));
 
-    const uint32_t wg = 4;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("metric_msjac", kmetric_msjacWGSL, "main", wg, wg, wg);
+        wgpuctx::Pipeline("metric_msjac", kmetric_msjacWGSL, "main", wgx, wgy, wgz);
     wgpuctx::Dispatch(pipe,
                       {up_img->getFloatdata().buf, down_img->getFloatdata().buf,
                        def_FINV->getFloatdata().buf, def_MINV->getFloatdata().buf,
                        updateFieldF->getFloatdata().buf, updateFieldM->getFloatdata().buf,
                        metric->getFloatdata().buf, par},
-                      (up_img->sz.x + wg - 1) / wg,
-                      (up_img->sz.y + wg - 1) / wg,
-                      (up_img->sz.z + wg - 1) / wg);
+                      (up_img->sz.x + wgx - 1) / wgx,
+                      (up_img->sz.y + wgy - 1) / wgy,
+                      (up_img->sz.z + wgz - 1) / wgz);
 
     const float sum = Reduce(metric->getFloatdata().buf, metric->NumVoxels(), ReduceOp::Sum);
     return sum / up_img->sz.x / up_img->sz.y / up_img->sz.z;
@@ -257,10 +278,17 @@ float ComputeMetric_CCJacSWithTaps(const CUDAIMAGE::Pointer up_img, const CUDAIM
     FillPhase(p, phase_vector, kernel_taps);
     wgpu::Buffer par = wgpuctx::CreateUniform(&p, sizeof(p));
 
-    const uint32_t wg = 4;
-    const uint32_t gx = (up_img->sz.x + wg - 1) / wg;
-    const uint32_t gy = (up_img->sz.y + wg - 1) / wg;
-    const uint32_t gz = (up_img->sz.z + wg - 1) / wg;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
+    const uint32_t gx = (up_img->sz.x + wgx - 1) / wgx;
+    const uint32_t gy = (up_img->sz.y + wgy - 1) / wgy;
+    const uint32_t gz = (up_img->sz.z + wgz - 1) / wgz;
 
     // The reference runs the whole three-kernel chain twice: (up, def_FINV) then
     // (down, def_MINV), the second overwriting the metric image.
@@ -295,7 +323,7 @@ float ComputeMetric_CCJacSWithTaps(const CUDAIMAGE::Pointer up_img, const CUDAIM
         for(int s = 0; s < 3; s++)
         {
             wgpu::ComputePipeline pipe =
-                wgpuctx::Pipeline("metric_ccjacs", kmetric_ccjacsWGSL, steps[s].entry, wg, wg, wg);
+                wgpuctx::Pipeline("metric_ccjacs", kmetric_ccjacsWGSL, steps[s].entry, wgx, wgy, wgz);
             wgpuctx::DispatchAt(pipe, *steps[s].b, gx, gy, gz);
         }
     };

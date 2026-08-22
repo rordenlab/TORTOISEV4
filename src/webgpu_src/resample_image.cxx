@@ -49,14 +49,21 @@ CUDAIMAGE::Pointer ResampleImage(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
 
     wgpu::Buffer params = wgpuctx::CreateUniform(&p, sizeof(p));
 
-    const uint32_t wg = 4;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("resample_image", kresample_imageWGSL, "main", wg, wg, wg);
+        wgpuctx::Pipeline("resample_image", kresample_imageWGSL, "main", wgx, wgy, wgz);
     wgpuctx::Dispatch(pipe,
                       {main_field->getFloatdata().buf, output->getFloatdata().buf, params},
-                      (virtual_img->sz.x + wg - 1) / wg,
-                      (virtual_img->sz.y + wg - 1) / wg,
-                      (virtual_img->sz.z + wg - 1) / wg);
+                      (virtual_img->sz.x + wgx - 1) / wgx,
+                      (virtual_img->sz.y + wgy - 1) / wgy,
+                      (virtual_img->sz.z + wgz - 1) / wgz);
     return output;
 }
 

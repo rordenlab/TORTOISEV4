@@ -12,7 +12,7 @@ CUDAIMAGE::Pointer AnisotropicSmoothField(CUDAIMAGE::Pointer field, CUDAIMAGE::P
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(field->components_per_voxel*sizeof(float)*field->sz.x,field->sz.y,field->sz.z);
     cudaMalloc3D(&d_output, extent);
-    cudaMemset3D(d_output,0,extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
 
 
@@ -205,7 +205,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
     cudaPitchedPtr d_output={0};
     cudaExtent extent =  make_cudaExtent(main_field->components_per_voxel*sizeof(float)*main_field->sz.x,main_field->sz.y,main_field->sz.z);
     cudaMalloc3D(&d_output, extent);
-    cudaMemset3D(d_output,0,extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
 
     gpucap::Rec cap("ComposeFields");
@@ -244,6 +244,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
 
     cudaExtent extent =  make_cudaExtent(field->components_per_voxel*sizeof(float)*field->sz.x,field->sz.y,field->sz.z);
     cudaMalloc3D(&d_output, extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);   // deterministic row padding (PERF_NOTES 2.3/12)
 
 
         cudaMemcpy3DParms copyParams = {0};
@@ -286,6 +287,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
 
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);   // deterministic row padding (PERF_NOTES 2.3/12)
 
     gpucap::Rec cap("AddImages");
     if(cap.on())
@@ -316,6 +318,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
 
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);   // deterministic row padding (PERF_NOTES 2.3/12)
 
     gpucap::Rec cap("MultiplyImage");
     if(cap.on())
@@ -349,7 +352,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
 
     if(!initial_estimate)
     {
-        cudaMemset3D(d_output,0,extent);
+        cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
     }
     else
     {
@@ -400,7 +403,7 @@ CUDAIMAGE::Pointer ComposeFields(CUDAIMAGE::Pointer main_field, CUDAIMAGE::Point
      cudaPitchedPtr d_output={0};
      cudaExtent extent =  make_cudaExtent(sizeof(float)*img->sz.x,img->sz.y,img->sz.z);
      cudaMalloc3D(&d_output, extent);
-     cudaMemset3D(d_output,0,extent);
+     cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);
 
     gpucap::Rec cap("PreprocessImage");
     if(cap.on())
@@ -437,11 +440,11 @@ std::vector<CUDAIMAGE::Pointer> ComputeImageGradientImg(CUDAIMAGE::Pointer img)
 
     cudaExtent extent =  make_cudaExtent(1*sizeof(float)*img->sz.x,img->sz.y,img->sz.z);
     cudaMalloc3D(&d_output_x, extent);
-    cudaMemset3D(d_output_x,0,extent);
+    cudaMemset(d_output_x.ptr,0,d_output_x.pitch*extent.height*extent.depth);
     cudaMalloc3D(&d_output_y, extent);
-    cudaMemset3D(d_output_y,0,extent);
+    cudaMemset(d_output_y.ptr,0,d_output_y.pitch*extent.height*extent.depth);
     cudaMalloc3D(&d_output_z, extent);
-    cudaMemset3D(d_output_z,0,extent);
+    cudaMemset(d_output_z.ptr,0,d_output_z.pitch*extent.height*extent.depth);
 
 
     gpucap::Rec cap("ComputeImageGradientImg");
@@ -537,6 +540,7 @@ CUDAIMAGE::Pointer DivideImages(CUDAIMAGE::Pointer im1, CUDAIMAGE::Pointer im2)
 
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);   // deterministic row padding (PERF_NOTES 2.3/12)
 
     DivideImages_cuda(im1->getFloatdata(),im2->getFloatdata(), d_output,  im1->sz,im1->components_per_voxel);
 
@@ -558,6 +562,7 @@ CUDAIMAGE::Pointer MultiplyImages(CUDAIMAGE::Pointer im1, CUDAIMAGE::Pointer im2
 
     cudaExtent extent =  make_cudaExtent(im1->components_per_voxel*sizeof(float)*im1->sz.x,im1->sz.y,im1->sz.z);
     cudaMalloc3D(&d_output, extent);
+    cudaMemset(d_output.ptr,0,d_output.pitch*extent.height*extent.depth);   // deterministic row padding (PERF_NOTES 2.3/12)
 
     gpucap::Rec cap("MultiplyImages");
     if(cap.on())

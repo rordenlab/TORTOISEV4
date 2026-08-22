@@ -125,8 +125,58 @@ after; only the record built to expose the bug moves.
 | **Never relax a tolerance to make a test go green.** | Every tolerance in this project was *derived from a measurement*. §5 records those measurements. Re-deriving or loosening them destroys the evidence chain. |
 | **Compute must run on the NVIDIA RTX 4070 Ti SUPER only.** | The host also exposes an AMD iGPU and llvmpipe. Both would run the kernels *correctly* and report meaningless performance. See §3. |
 | **`gpu_replay` (CUDA self-replay) must stay bit-exact.** | It is the anchor for everything else. If it ever stops being bit-exact, something changed in the CUDA path and the whole comparison basis is void. |
-| **Do not "fix" upstream oddities encountered while porting.** | e.g. the swapped `kernel<<<blockSize, gridSize>>>` naming throughout `src/cuda_src/`. Behaviour is correct; only the naming is wrong. Non-goals: §1.1. |
+| **Do not "fix" upstream oddities encountered while porting.** | Non-goals: §1.1. **EXCEPT the swapped `kernel<<<blockSize, gridSize>>>` launches, which this rule used to call cosmetic — that was wrong.** The arguments really are swapped, so grid-shaped values become *block* dimensions: `blockDim=(4,4,2)` on `fast`, and **(1,1,1) — one thread per block** — on downsampled DRBUDDI stages. Results were correct, performance was not. Fixed for 46 elementwise launches (`PERF_NOTES.md` §14); reductions keep their geometry because block size sets summation order. Do not revert. |
 | **`audit_response.md` and `benchmark/milestones/` are gitignored** (`audit_*.md`, `plan_*.md`). | Deliberate, by the repo owner. They are internal working documents. Do not assume a fresh clone has them, and do not make this file depend on them. |
+
+> ## Working on PERFORMANCE, not the port?
+> Read **`PERF_NOTES.md`** (committed) and **`plan_optimize.md`** (gitignored) instead of
+> starting here. **Both bullets this banner used to carry are now obsolete** and are kept only
+> so nobody re-derives them: stage wall timers now exist (`src/main/tortoise_profile.h`, always
+> on, `[PROFILE] <name> <seconds>` on stderr) and utilisation *has* been measured
+> (`PERF_NOTES.md` §2.1). The bottleneck was **not** DRBUDDI: it was DIFFPREP registration at
+> 45 % of wall clock (§1).
+>
+> `fast` is currently **708 s → ~474 s (−33 %)**, all of it bit-exact. Read §12 before trusting
+> any DRBUDDI-side measurement — its per-iteration time swings 34 % between identical runs, and
+> three separate attributions were made and retracted because of it.
+>
+> This file still governs: the fidelity rules (§0), the validation architecture (§4) and the
+> derived tolerances (§5) apply unchanged to optimisation work. `gpu_replay` must stay
+> bit-exact.
+
+> ## Open opportunities, and one outstanding obligation
+>
+> **OPPORTUNITY — running sums for the correlation-window kernels (needs sign-off).**
+> `computeFiniteDiffStructs` is the largest single GPU kernel (~22 % of kernel time, ~22 ms per
+> call). It evaluates a **19×19×9 = 3 249-voxel** window per output voxel
+> (`WIN_RAD_JAC`/`WIN_RAD_JAC_Z` in `compute_metric.cu`; the CC path is 11×11×7 = 847). Adjacent
+> outputs share ~95 % of their window, so a **running sum / summed-area formulation reduces the
+> per-voxel cost from O(w³) to O(1)** — by far the largest theoretical win left in the codebase,
+> plausibly an order of magnitude on that kernel.
+>
+> **It is not bit-exact, and that is the whole problem.** Incremental sums accumulate in a
+> different order, and floating-point addition is not associative, so `gpu_replay` would stop
+> being byte-identical — the anchor the entire validation architecture rests on (§4, §5). Doing
+> it requires: explicit owner sign-off, a full recapture of all 381 golden vectors across three
+> datasets (~80 min GPU), re-verification of the WebGPU port against the new records, and a fresh
+> derivation of every tolerance in §5. **Do not start it as ordinary performance work.**
+>
+> Cheaper, bit-exact levers on the same kernel are listed in `PERF_NOTES.md` §20 — note that
+> register blocking was tried and made it **59 % slower**, so the kernel wants occupancy, not
+> ILP. `ncu` would settle the direction in one run but is blocked here: `ERR_NVGPUCTRPERM` needs
+> `NVreg_RestrictProfilingToAdminUsers=0`, i.e. root, and there is no sudo on this machine.
+>
+> **OBLIGATION — a full `revalidate.sh --compare` has NOT been run against the current binary.**
+> Every gate inside it has been run individually and passes (`gpu_replay` 132/118/106 bit-exact,
+> `webgpu_replay` 132/118/106/25, adapter probe, negative tests), but the one-command suite and
+> its end-to-end smoke comparison have not completed on the final code. It must be run as a
+> **single clean sequence** — regenerate the reference evidence, *then* revalidate, with **no
+> source edits in between**. Editing source mid-sequence invalidates the evidence and re-trips
+> the staleness gates; that mistake was made twice during this work. Budget ~70 min.
+>
+> One gate is known-failing and is **not** caused by this work: `record manifest` reports drift
+> because `benchmark/MANIFEST.json` (dated 08-21 02:49) predates a recapture of the record trees
+> (07:14–08:33 the same morning). Regenerating it is baseline bookkeeping and is the owner's call.
 
 Authoritative documents, in order of precedence:
 **this file** → `benchmark/README.md` (datasets, baselines, methodology) →

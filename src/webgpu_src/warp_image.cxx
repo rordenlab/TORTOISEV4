@@ -35,16 +35,23 @@ CUDAIMAGE::Pointer WarpImage(CUDAIMAGE::Pointer main_image, CUDAIMAGE::Pointer f
     // Optional emulation of CUDA's 1.8 fixed-point texture filter weights, for
     // A/B validation against the hardware sampler (CLAUDE.md 5.2).
     const bool quantise = std::getenv("TORTOISE_WEBGPU_CUDA_TEXFILTER") != nullptr;
-    const uint32_t wg = 4;
+    // 32 invocations along x is one coalesced run along a row. The previous 4x4x4 tiling
+    // put only 4 in x, so a 32-wide NVIDIA subgroup spanned 8 pitch-separated rows and
+    // issued 8 scattered accesses where one would do - the same defect as the CUDA side
+    // (see ElementwiseLaunch in cuda_image_utilities.cu), where fixing it measured -39%
+    // on NegateImage and -30% on computeFiniteDiffStructs. Shape-agnostic: every
+    // elementwise shader indexes by global_invocation_id with an inside() guard.
+    // NOT for reductions - reductions.wgsl uses workgroup memory and a fixed geometry.
+    const uint32_t wgx = 32, wgy = 4, wgz = 1;
     wgpu::ComputePipeline pipe =
-        wgpuctx::Pipeline("warp_image", kwarp_imageWGSL, "main", wg, wg, wg,
+        wgpuctx::Pipeline("warp_image", kwarp_imageWGSL, "main", wgx, wgy, wgz,
                           {{"TEXFILTER_QUANTISE", quantise ? 1.0 : 0.0}});
     wgpuctx::Dispatch(pipe,
                       {main_image->getFloatdata().buf, field_image->getFloatdata().buf,
                        output->getFloatdata().buf, params},
-                      (main_image->sz.x + wg - 1) / wg,
-                      (main_image->sz.y + wg - 1) / wg,
-                      (main_image->sz.z + wg - 1) / wg);
+                      (main_image->sz.x + wgx - 1) / wgx,
+                      (main_image->sz.y + wgy - 1) / wgy,
+                      (main_image->sz.z + wgz - 1) / wgz);
     return output;
 }
 
