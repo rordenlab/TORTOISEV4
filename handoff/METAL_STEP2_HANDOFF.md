@@ -37,6 +37,48 @@ Step2's inputs.
 
 So: the fixture is frozen on disk, but not in effect.
 
+### It is worse than that: a slower backend gets MORE nondeterminism
+
+The dynamic queue sizes the CPU/GPU split from **measured** per-volume throughput. A
+slower GPU therefore takes fewer volumes and pushes more onto the ITK CPU path - which
+is the non-reproducible one. Measured on this host, same machine, same data:
+
+| backend | `t_gpu` per volume | split (GPU/CPU) | volumes on the NONDETERMINISTIC path |
+|---|---:|---|---:|
+| CUDA | 0.51 s | 108 / 30 | 30 |
+| WebGPU | 1.26 s | 78 / 60 | **60** |
+
+**Metal will very likely also be slower than CUDA**, so expect it to land nearer the
+WebGPU split - i.e. roughly twice as many volumes through the non-reproducible path as
+the CUDA reference it is being compared with.
+
+Two consequences, and the second is the nasty one:
+
+1. Your Metal runs will vary run-to-run **more** than the CUDA reference does.
+2. Because the two backends run **different splits**, a Step2 difference conflates the
+   actual GPU-kernel difference with *differing amounts of ITK contamination*. It is
+   not a clean backend delta in either direction.
+
+This also means the comparison gets *less* trustworthy the slower your backend is -
+exactly backwards from what you want while bringing a new backend up.
+
+### Removing it entirely (recommended if you use Step2 at all)
+
+`OMP_NUM_THREADS=1` makes the whole thing deterministic **with no rebuild**: with
+`Nt = 1` the queue creates a single worker, that worker is the GPU thread, so every
+volume takes the GPU path and no ITK CPU registration happens at all. Routing is then
+fixed, DIFFPREP output is reproducible, and Step2's inputs are stable.
+
+    OMP_NUM_THREADS=1 benchmark/scripts/drbuddi_isolated.sh run M1 Metal
+
+Cost: it single-threads the rest of the pipeline, so the run is substantially slower.
+For a correctness comparison that is the right trade. `-DTORTOISE_DETERMINISTIC_GPU=1`
+achieves the same thing at build time while keeping other stages parallel.
+
+**Both references shipped here were produced WITHOUT that flag**, so they carry the
+variance described above. If you want an exact reference, ask for a regenerated pair -
+it is ~25 minutes of GPU time on the Linux host.
+
 ### What to do about it
 
 **Judge Metal against the CUDA-vs-CUDA floor, not against an absolute number.** This is
@@ -105,8 +147,21 @@ bin/webgpu_replay --all <bundle>/records/synthetic   #  25
 grades Metal against exactly the reference and tolerances the Vulkan backend passes.
 Build that bundle with `benchmark/scripts/make_reference_bundle.sh <out> [--tar]`.
 
-**Prefer it.** It is unaffected by the contamination above, and it tells you *which*
-kernel diverges. The Step2 comparison only tells you *that* the stage diverges.
+**Prefer it, and if you are stalled, start here.** It is unaffected by everything
+above - no DIFFPREP, no ITK CPU path, no scheduling, no fixture. Each record is a single
+kernel invocation with its inputs and CUDA's recorded output, so a failure names the
+kernel. The Step2 comparison can only tell you *that* the stage diverges, and right now
+it cannot even do that cleanly.
+
+Suggested order for bringing Metal up:
+
+1. `bin/webgpu_probe` - confirm adapter selection before anything else.
+2. `webgpu_replay --all records/synthetic` (25) - analytic references, exact answers,
+   smallest volumes. Failures here are unambiguous.
+3. `webgpu_replay --all records/fast` (132) - all 20 ported ops.
+4. `records/medium` (118) and `records/slow` (106) - larger matrices, catches
+   dimension- and pitch-dependent bugs.
+5. Only then consider Step2, and only with `OMP_NUM_THREADS=1`.
 
 Also note (§3.1): the Metal defaults are untested. Start with
 `TORTOISE_WEBGPU_BACKEND=metal`, `TORTOISE_WEBGPU_ADAPTER_TYPE=integrated`,
