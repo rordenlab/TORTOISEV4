@@ -3,11 +3,11 @@
 Gotchas, exhausted paths and non-obvious findings. Not a history. Anything here is
 here because it cost someone time or would silently break correctness.
 
-Companion documents: `PERF_NOTES.md` (performance evidence, committed),
-`benchmark/README.md` (datasets/methodology — **`benchmark/` is gitignored except `scripts/`**,
-~114 GB, copied between machines; every `benchmark/...` path below resolves to nothing in a
-fresh clone). `plan_metal.md` / `plan_faster.md` are gitignored working plans —
-**never make committed source or docs depend on them.**
+Companion documents, **all gitignored** — `benchmark/` is excluded except `scripts/`, so
+every `benchmark/...` path below resolves to nothing in a fresh clone: `benchmark/PERF_NOTES.md`
+(performance evidence), `benchmark/README.md` (datasets/methodology; ~114 GB, copied between
+machines), and the `plan_metal.md` / `plan_faster.md` working plans. **Never make committed
+source or docs depend on them.**
 
 ---
 
