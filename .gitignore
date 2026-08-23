@@ -14,6 +14,13 @@ benchmark/*
 # benchmark/milestones/ is deliberately NOT re-included: the close-out documents are
 # internal working evidence (M1-M6), like plan_*.md and audit_*.md below.
 
+# EXCEPTION, added 2026-08-22: the harness IS re-included. The 2026-08-21 call assumed
+# it was useless without the data; instead the Metal backend cases sat undelivered on
+# one machine while another reported the harness could not drive Metal at all. The
+# scripts are 236 KB of source and are how each backend is invoked - they must travel
+# through git. Datasets and run outputs stay excluded.
+!benchmark/scripts/
+
 # Coding
 plan_*.md
 audit_*.md

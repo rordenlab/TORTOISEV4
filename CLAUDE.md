@@ -4,7 +4,7 @@ Gotchas, exhausted paths and non-obvious findings. Not a history. Anything here 
 here because it cost someone time or would silently break correctness.
 
 Companion documents: `PERF_NOTES.md` (performance evidence, committed),
-`benchmark/README.md` (datasets/methodology — **the whole `benchmark/` tree is gitignored**,
+`benchmark/README.md` (datasets/methodology — **`benchmark/` is gitignored except `scripts/`**,
 ~114 GB, copied between machines; every `benchmark/...` path below resolves to nothing in a
 fresh clone). `plan_metal.md` / `plan_faster.md` are gitignored working plans —
 **never make committed source or docs depend on them.**
