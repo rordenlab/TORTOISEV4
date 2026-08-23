@@ -20,6 +20,10 @@ case $BACKEND in
     DET|DET_*)   EXE=$ROOT/bin/TORTOISEProcess_cuda_det;   BUILDDIR=$ROOT/build_cuda_det ;;
     NOFMA)       EXE=$ROOT/bin/TORTOISEProcess_cuda_nofma; BUILDDIR=$ROOT/build_cuda_nofma ;;
     CUDA|CUDA_*|CAPTURE*) EXE=$ROOT/bin/TORTOISEProcess_cuda;   BUILDDIR=$ROOT/build_cuda ;;
+    # *_DET arms MUST precede their generic counterpart, or WebGPU_* swallows
+    # WebGPU_DET and records the non-deterministic binary under a _DET tag.
+    CUDA_DET*)   EXE=$ROOT/bin/TORTOISEProcess_cuda_det;   BUILDDIR=$ROOT/build_cuda_det ;;
+    WebGPU_DET*) EXE=$ROOT/bin/TORTOISEProcess_webgpu_det; BUILDDIR=$ROOT/build_webgpu_det ;;
     WebGPU|WebGPU_*) EXE=$ROOT/bin/TORTOISEProcess_webgpu; BUILDDIR=$ROOT/build_webgpu ;;
     Metal_DET*) EXE=$ROOT/bin/TORTOISEProcess_metal_det; BUILDDIR=$ROOT/build_metal_det ;;
     Metal|Metal_*) EXE=$ROOT/bin/TORTOISEProcess_metal; BUILDDIR=$ROOT/build_metal ;;

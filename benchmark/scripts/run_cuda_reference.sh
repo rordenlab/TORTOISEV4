@@ -29,6 +29,10 @@ case $BACKEND in
     CUDA|CUDA_*|CAPTURE*)   EXE=$ROOT/bin/TORTOISEProcess_cuda ;;
     # WebGPU_* variants (e.g. WebGPU_2STR) run the same binary into a separate
     # folder, mirroring the CUDA_* convention.
+    # *_DET arms MUST precede their generic counterpart: WebGPU_* would otherwise
+    # swallow WebGPU_DET and run the NON-deterministic binary under a _DET tag.
+    CUDA_DET*)   EXE=$ROOT/bin/TORTOISEProcess_cuda_det ;;
+    WebGPU_DET*) EXE=$ROOT/bin/TORTOISEProcess_webgpu_det ;;
     WebGPU|WebGPU_*) EXE=$ROOT/bin/TORTOISEProcess_webgpu ;;
     # Metal_* variants mirror the CUDA_*/WebGPU_* convention.
     # *_DET variants use the DETERMINISTIC_GPU build, which the build system gives a
